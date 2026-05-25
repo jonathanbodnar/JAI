@@ -3,20 +3,59 @@ import { useEffect, useRef, useState } from "react";
 import { ChatSocket, type ServerMsg } from "@/lib/ws";
 import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
 import Link from "next/link";
-import { Settings } from "lucide-react";
+import { Settings, Trash2 } from "lucide-react";
 import { MessageList, type Message } from "./MessageList";
 import { Composer } from "./Composer";
 import { PushToTalk } from "./PushToTalk";
 import { cn } from "@/lib/cn";
 
+const CHAT_KEY = "jai.chat.messages.v1";
+const CHAT_MAX = 500; // cap so localStorage doesn't blow up
+
+function loadMessages(): Message[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(CHAT_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Message[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveMessages(msgs: Message[]) {
+  if (typeof window === "undefined") return;
+  try {
+    const trimmed = msgs.slice(-CHAT_MAX);
+    localStorage.setItem(CHAT_KEY, JSON.stringify(trimmed));
+  } catch {
+    // quota exceeded → drop oldest half and retry once
+    try {
+      localStorage.setItem(CHAT_KEY, JSON.stringify(msgs.slice(-Math.floor(CHAT_MAX / 2))));
+    } catch {
+      // give up; chat continues, just not persisted
+    }
+  }
+}
+
 export function ChatView() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Hydrate from localStorage so the conversation survives tab switches,
+  // PWA backgrounding, or accidental reloads. The backend's LangGraph
+  // checkpointer is the source of truth long-term; we'll wire history
+  // sync from there later.
+  const [messages, setMessages] = useState<Message[]>(() => loadMessages());
   const [connected, setConnected] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [recording, setRecording] = useState(false);
   const wsRef = useRef<ChatSocket | null>(null);
   const recRef = useRef<PressRecorder | null>(null);
   const playerRef = useRef<StreamingAudioPlayer | null>(null);
+
+  // Persist on every change.
+  useEffect(() => {
+    saveMessages(messages);
+  }, [messages]);
 
   useEffect(() => {
     const sock = new ChatSocket({
@@ -106,6 +145,19 @@ export function ChatView() {
             />
             {connected ? "live" : "connecting…"}
           </div>
+          {messages.length > 0 && (
+            <button
+              onClick={() => {
+                if (confirm("Clear local chat view? Conversation history in memory is unaffected."))
+                  setMessages([]);
+              }}
+              aria-label="Clear chat"
+              className="text-[var(--fg-mute)] hover:text-white"
+              title="Clear local chat view"
+            >
+              <Trash2 size={16} />
+            </button>
+          )}
           <Link href="/settings" aria-label="Settings" className="text-[var(--fg-mute)] hover:text-white">
             <Settings size={18} />
           </Link>
