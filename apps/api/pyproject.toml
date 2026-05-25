@@ -38,6 +38,8 @@ dependencies = [
   "google-auth>=2.35.0",
   "google-auth-oauthlib>=1.2.1",
   "itsdangerous>=2.2.0",
+  # ingest (PDF + ChatGPT exports)
+  "pypdf>=5.1.0",
   # misc
   "tenacity>=9.0.0",
   "structlog>=24.4.0",

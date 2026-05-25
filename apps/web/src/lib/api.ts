@@ -1,9 +1,9 @@
 "use client";
 import { supabase } from "./supabase";
 
-const BASE = process.env.NEXT_PUBLIC_JAI_BACKEND_URL || "http://localhost:8000";
+export const BASE = process.env.NEXT_PUBLIC_JAI_BACKEND_URL || "http://localhost:8000";
 
-async function authHeader(): Promise<Record<string, string>> {
+export async function authHeader(): Promise<Record<string, string>> {
   try {
     const { data } = await supabase().auth.getSession();
     const t = data.session?.access_token;

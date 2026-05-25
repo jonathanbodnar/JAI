@@ -17,6 +17,7 @@ from .mcp_server.server import build_mcp_server, expected_token
 from .routes import (
     audit,
     chat,
+    context_ingest,
     jobs,
     mcp_connections,
     notes,
@@ -79,6 +80,7 @@ app.include_router(oauth.router, prefix="/auth", tags=["auth"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(status_routes.router, prefix="/status", tags=["status"])
 app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
+app.include_router(context_ingest.router, prefix="/context", tags=["context"])
 
 
 @app.get("/health")

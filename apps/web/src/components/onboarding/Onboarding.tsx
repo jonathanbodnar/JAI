@@ -1,51 +1,20 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { api } from "@/lib/api";
-import { ChevronRight, Sparkles } from "lucide-react";
+import { api, authHeader, BASE } from "@/lib/api";
+import { FileText, Sparkles, Upload, X } from "lucide-react";
 
-const STEPS = [
-  {
-    key: "intro",
-    title: "Let's wire up your second brain",
-    body: "I'll ask five quick things so I know how to think and talk like you. Skip anything you don't want to share.",
-  },
-  {
-    key: "identity",
-    title: "Who you are, in three sentences",
-    helper: "Role, background, what you're building. I'll remember this forever.",
-    placeholder: "I'm a founder building [thing]. Background in [x]. I care about [y].",
-    field: "facts",
-    type: "multiline",
-    count: 3,
-  },
-  {
-    key: "focus",
-    title: "What you're shipping right now",
-    helper: "The one thing on your mind this quarter.",
-    placeholder: "Get JAI to TestFlight by end of June",
-    field: "primary_focus",
-    type: "text",
-  },
-  {
-    key: "voice",
-    title: "How I should talk to you",
-    helper: "Concise? Direct? Use bullet points? Hate emoji? Tell me your style.",
-    placeholder: "Concise, direct, no fluff. Push back when I'm wrong.",
-    field: "voice_preference",
-    type: "text",
-  },
-  {
-    key: "people",
-    title: "The people in your orbit",
-    helper: "Co-founders, key customers, advisors — names and how they relate to you.",
-    placeholder: "Alice — my co-founder. Bob — design lead. Carol — first paying customer.",
-    field: "relationships",
-    type: "multiline",
-    count: 3,
-  },
-] as const;
-
+/**
+ * Single-screen onboarding. We do NOT ask quiz questions — that data leaks
+ * out of normal conversation anyway. Instead:
+ *
+ *   - Drag/drop PDFs, .txt, .md (bio, beliefs, business docs, journals)
+ *   - Drop your ChatGPT data export (`conversations.json` or the .zip)
+ *   - Optionally write one line of bio
+ *
+ * Anything uploaded gets chunked → Qdrant (semantic memory) and the model
+ * pulls identity facts → Mem0 (long-term identity). Skip is always an option.
+ */
 export function OnboardingGate({ children }: { children: React.ReactNode }) {
   const { data, isLoading } = useSWR<{ completed: boolean }>(
     "/onboarding/status",
@@ -64,13 +33,22 @@ export function OnboardingGate({ children }: { children: React.ReactNode }) {
   );
 }
 
+type IngestSummary = {
+  files: number;
+  chunks_added: number;
+  facts_added: number;
+  conversations_added: number;
+  skipped: string[];
+};
+
 function OnboardingModal({ onClose }: { onClose: () => void }) {
-  const [step, setStep] = useState(0);
-  const [facts, setFacts] = useState<string[]>(["", "", ""]);
-  const [focus, setFocus] = useState("");
-  const [voice, setVoice] = useState("");
-  const [people, setPeople] = useState<string[]>(["", "", ""]);
+  const [files, setFiles] = useState<File[]>([]);
+  const [bio, setBio] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [summary, setSummary] = useState<IngestSummary | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { mutate } = useSWRConfig();
 
   useEffect(() => {
@@ -80,24 +58,55 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
-  const s = STEPS[step];
-  const last = step === STEPS.length - 1;
+  function addFiles(picked: FileList | File[]) {
+    const arr = Array.from(picked).filter((f) => f.size > 0);
+    setFiles((prev) => [...prev, ...arr]);
+  }
 
-  async function finish() {
+  function removeFile(i: number) {
+    setFiles((prev) => prev.filter((_, j) => j !== i));
+  }
+
+  async function finish(opts: { skip: boolean }) {
+    if (busy) return;
     setBusy(true);
     try {
+      // 1. Upload files if any
+      if (files.length) {
+        setProgress(`Ingesting ${files.length} file${files.length > 1 ? "s" : ""}…`);
+        const fd = new FormData();
+        files.forEach((f) => fd.append("files", f));
+        const headers = await authHeader();
+        const res = await fetch(`${BASE}/context/ingest`, {
+          method: "POST",
+          body: fd,
+          headers, // FormData sets its own Content-Type
+        });
+        if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+        const s = (await res.json()) as IngestSummary;
+        setSummary(s);
+      }
+
+      // 2. Mark onboarded + persist bio (also flips the gate)
+      setProgress("Saving…");
       await api("/onboarding", {
         method: "POST",
         body: JSON.stringify({
-          facts: facts.filter((f) => f.trim()),
-          primary_focus: focus || null,
-          voice_preference: voice || null,
-          relationships: people.filter((p) => p.trim()),
+          skip: opts.skip,
+          bio: bio.trim() || null,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }),
       });
       mutate("/onboarding/status");
-      onClose();
+
+      // Show summary briefly, then close
+      if (summary || files.length) {
+        setTimeout(onClose, 1500);
+      } else {
+        onClose();
+      }
+    } catch (e) {
+      setProgress(`Error: ${e instanceof Error ? e.message : "unknown"}`);
     } finally {
       setBusy(false);
     }
@@ -105,106 +114,150 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-6">
-      <div className="bg-[var(--bg-elev)] w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl border border-[var(--line)] flex flex-col max-h-[90vh]">
+      <div className="bg-[var(--bg-elev)] w-full sm:max-w-lg sm:rounded-2xl rounded-t-2xl border border-[var(--line)] flex flex-col max-h-[92vh]">
         <header className="px-5 py-4 border-b border-[var(--line)] flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles size={16} className="text-[var(--accent)]" />
-            <span className="text-xs uppercase tracking-wider text-[var(--fg-mute)]">
-              Step {step + 1} of {STEPS.length}
-            </span>
+            <span className="text-sm font-medium">Seed your second brain</span>
           </div>
-          <button onClick={onClose} className="text-xs text-[var(--fg-mute)] hover:text-white">
-            Skip for now
+          <button
+            onClick={onClose}
+            className="text-xs text-[var(--fg-mute)] hover:text-white"
+            disabled={busy}
+          >
+            Skip
           </button>
         </header>
 
-        <div className="px-5 py-6 flex-1 overflow-y-auto space-y-4">
-          <h2 className="text-xl font-semibold tracking-tight">{s.title}</h2>
-          {"body" in s && s.body && (
-            <p className="text-sm text-[var(--fg-mute)] leading-relaxed">{s.body}</p>
-          )}
-          {"helper" in s && s.helper && (
-            <p className="text-xs text-[var(--fg-mute)]">{s.helper}</p>
-          )}
+        <div className="px-5 py-5 flex-1 overflow-y-auto space-y-5">
+          <p className="text-sm text-[var(--fg-mute)] leading-relaxed">
+            Drop anything that describes you — bio PDFs, beliefs, business plans,
+            journals. Even better: your ChatGPT export (the{" "}
+            <code className="text-[var(--fg)]">conversations.json</code> file or its
+            zip). I&apos;ll extract identity facts and index everything for recall.
+          </p>
 
-          {"field" in s && s.field === "facts" && (
-            <div className="space-y-2">
-              {facts.map((f, i) => (
-                <textarea
-                  key={i}
-                  value={f}
-                  onChange={(e) =>
-                    setFacts(facts.map((x, j) => (j === i ? e.target.value : x)))
-                  }
-                  rows={2}
-                  placeholder={i === 0 ? s.placeholder : `Another fact about you (optional)`}
-                  className="w-full bg-[var(--bg-elev2)] rounded-lg px-3 py-2 text-sm border border-[var(--line)] focus:border-[var(--accent)] outline-none resize-none"
-                />
-              ))}
-            </div>
-          )}
-
-          {"field" in s && s.field === "primary_focus" && (
+          {/* Drop zone */}
+          <label
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (e.dataTransfer.files) addFiles(e.dataTransfer.files);
+            }}
+            className={`block border-2 border-dashed rounded-xl px-5 py-8 text-center cursor-pointer transition ${
+              dragOver
+                ? "border-[var(--accent)] bg-[var(--bg-elev2)]"
+                : "border-[var(--line)] hover:border-[var(--fg-mute)]"
+            }`}
+          >
             <input
-              autoFocus
-              value={focus}
-              onChange={(e) => setFocus(e.target.value)}
-              placeholder={s.placeholder}
-              className="w-full bg-[var(--bg-elev2)] rounded-lg px-3 py-2 text-sm border border-[var(--line)] focus:border-[var(--accent)] outline-none"
+              ref={inputRef}
+              type="file"
+              multiple
+              hidden
+              accept=".pdf,.txt,.md,.json,.zip,application/pdf,text/plain,text/markdown,application/json,application/zip"
+              onChange={(e) => e.target.files && addFiles(e.target.files)}
             />
+            <Upload size={20} className="mx-auto text-[var(--fg-mute)] mb-2" />
+            <div className="text-sm">
+              <span className="font-medium">Drop files</span>{" "}
+              <span className="text-[var(--fg-mute)]">or click to browse</span>
+            </div>
+            <div className="text-xs text-[var(--fg-mute)] mt-1">
+              PDF, TXT, MD, JSON, ZIP · up to 25MB each
+            </div>
+          </label>
+
+          {files.length > 0 && (
+            <ul className="space-y-1.5">
+              {files.map((f, i) => (
+                <li
+                  key={`${f.name}-${i}`}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--bg-elev2)] border border-[var(--line)]"
+                >
+                  <FileText size={14} className="text-[var(--fg-mute)] shrink-0" />
+                  <span className="text-sm truncate flex-1">{f.name}</span>
+                  <span className="text-xs text-[var(--fg-mute)] shrink-0">
+                    {(f.size / 1024).toFixed(0)} KB
+                  </span>
+                  <button
+                    onClick={() => removeFile(i)}
+                    disabled={busy}
+                    className="text-[var(--fg-mute)] hover:text-white"
+                  >
+                    <X size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
 
-          {"field" in s && s.field === "voice_preference" && (
+          <div className="space-y-1.5">
+            <label className="text-xs text-[var(--fg-mute)] uppercase tracking-wider">
+              Optional one-line bio
+            </label>
             <textarea
-              value={voice}
-              onChange={(e) => setVoice(e.target.value)}
-              rows={3}
-              placeholder={s.placeholder}
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+              rows={2}
+              placeholder="Founder building JAI. Background in X. Care about Y."
               className="w-full bg-[var(--bg-elev2)] rounded-lg px-3 py-2 text-sm border border-[var(--line)] focus:border-[var(--accent)] outline-none resize-none"
             />
+          </div>
+
+          {progress && (
+            <div className="text-xs text-[var(--fg-mute)]">{progress}</div>
           )}
 
-          {"field" in s && s.field === "relationships" && (
-            <div className="space-y-2">
-              {people.map((p, i) => (
-                <input
-                  key={i}
-                  value={p}
-                  onChange={(e) =>
-                    setPeople(people.map((x, j) => (j === i ? e.target.value : x)))
-                  }
-                  placeholder={i === 0 ? s.placeholder : `Another person (optional)`}
-                  className="w-full bg-[var(--bg-elev2)] rounded-lg px-3 py-2 text-sm border border-[var(--line)] focus:border-[var(--accent)] outline-none"
-                />
-              ))}
+          {summary && (
+            <div className="rounded-lg bg-[var(--bg-elev2)] border border-[var(--line)] px-3 py-2 text-xs text-[var(--fg-mute)] space-y-0.5">
+              <div>
+                <span className="text-[var(--ok)]">✓</span> {summary.files} file
+                {summary.files === 1 ? "" : "s"} ingested
+              </div>
+              <div>{summary.chunks_added} chunks embedded into semantic memory</div>
+              {summary.conversations_added > 0 && (
+                <div>
+                  {summary.conversations_added} ChatGPT conversation
+                  {summary.conversations_added === 1 ? "" : "s"} indexed
+                </div>
+              )}
+              {summary.facts_added > 0 && (
+                <div>{summary.facts_added} identity facts saved to long-term memory</div>
+              )}
+              {summary.skipped.length > 0 && (
+                <div className="text-[var(--warn)]">
+                  Skipped: {summary.skipped.join(", ")}
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        <footer className="px-5 py-4 border-t border-[var(--line)] flex items-center justify-between safe-bottom">
+        <footer className="px-5 py-4 border-t border-[var(--line)] flex items-center justify-between gap-2 safe-bottom">
           <button
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
-            disabled={step === 0}
-            className="text-sm text-[var(--fg-mute)] disabled:opacity-30"
+            onClick={() => finish({ skip: true })}
+            disabled={busy}
+            className="text-sm text-[var(--fg-mute)] hover:text-white disabled:opacity-40"
           >
-            Back
+            Do this later
           </button>
-          {last ? (
-            <button
-              onClick={finish}
-              disabled={busy}
-              className="bg-[var(--accent)] text-white text-sm font-medium rounded-full px-5 py-2 flex items-center gap-1.5 disabled:opacity-50"
-            >
-              {busy ? "Saving…" : "Save & start"}
-            </button>
-          ) : (
-            <button
-              onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}
-              className="bg-[var(--accent)] text-white text-sm font-medium rounded-full px-5 py-2 flex items-center gap-1.5"
-            >
-              Next <ChevronRight size={14} />
-            </button>
-          )}
+          <button
+            onClick={() => finish({ skip: false })}
+            disabled={busy}
+            className="bg-[var(--accent)] text-white text-sm font-medium rounded-full px-5 py-2 disabled:opacity-50"
+          >
+            {busy
+              ? "Working…"
+              : files.length || bio.trim()
+                ? `Ingest ${files.length ? `${files.length} file${files.length > 1 ? "s" : ""}` : "bio"}`
+                : "Continue"}
+          </button>
         </footer>
       </div>
     </div>
