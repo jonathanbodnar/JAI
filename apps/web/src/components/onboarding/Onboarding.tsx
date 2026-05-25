@@ -19,6 +19,13 @@ export function OnboardingGate({ children }: { children: React.ReactNode }) {
   const { data, isLoading } = useSWR<{ completed: boolean }>(
     "/onboarding/status",
     (k: string) => api(k),
+    {
+      // Don't yank the modal out from under the user mid-form.
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      revalidateIfStale: false,
+      dedupingInterval: 60_000,
+    },
   );
   const [skipped, setSkipped] = useState(false);
 
@@ -33,6 +40,38 @@ export function OnboardingGate({ children }: { children: React.ReactNode }) {
   );
 }
 
+const DRAFT_KEY = "jai.onboarding.draft";
+
+type Draft = { bio: string };
+
+function loadDraft(): Draft {
+  if (typeof window === "undefined") return { bio: "" };
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    return raw ? (JSON.parse(raw) as Draft) : { bio: "" };
+  } catch {
+    return { bio: "" };
+  }
+}
+
+function saveDraft(d: Draft) {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+  } catch {
+    // sessionStorage may throw in private mode; ignore.
+  }
+}
+
+function clearDraft() {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 type IngestSummary = {
   files: number;
   chunks_added: number;
@@ -43,7 +82,10 @@ type IngestSummary = {
 
 function OnboardingModal({ onClose }: { onClose: () => void }) {
   const [files, setFiles] = useState<File[]>([]);
-  const [bio, setBio] = useState("");
+  // Hydrate bio from sessionStorage so an unexpected SW reload or remount
+  // doesn't wipe partially-typed text. (Files can't be persisted — browser
+  // security forbids it — but the user can re-drop them quickly.)
+  const [bio, setBio] = useState<string>(() => loadDraft().bio);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [summary, setSummary] = useState<IngestSummary | null>(null);
@@ -57,6 +99,11 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
       document.body.style.overflow = "";
     };
   }, []);
+
+  // Persist bio on every change.
+  useEffect(() => {
+    saveDraft({ bio });
+  }, [bio]);
 
   function addFiles(picked: FileList | File[]) {
     const arr = Array.from(picked).filter((f) => f.size > 0);
@@ -98,6 +145,7 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
         }),
       });
       mutate("/onboarding/status");
+      clearDraft();
 
       // Show summary briefly, then close
       if (summary || files.length) {

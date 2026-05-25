@@ -4,6 +4,7 @@ import "@xyflow/react/dist/style.css";
 import { BottomNav } from "@/components/nav/BottomNav";
 import { AuthGate } from "@/lib/auth-gate";
 import { OnboardingGate } from "@/components/onboarding/Onboarding";
+import { ServiceWorkerTamer } from "@/lib/sw-tame";
 
 export const metadata: Metadata = {
   title: "JAI",
@@ -37,6 +38,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="flex flex-col h-dvh overflow-hidden">
+        <ServiceWorkerTamer />
         <AuthGate>
           <OnboardingGate>
             <main className="flex-1 overflow-hidden relative">{children}</main>
