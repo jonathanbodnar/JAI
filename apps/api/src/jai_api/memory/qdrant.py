@@ -8,12 +8,14 @@ from typing import Any
 
 import structlog
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import (
     Distance,
     FieldCondition,
     Filter,
     FilterSelector,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     Range,
     VectorParams,
@@ -47,6 +49,30 @@ class JaiQdrant:
                 vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
             )
             log.info("qdrant.collection.created", name=self._collection)
+
+        # Qdrant requires a payload index on any field used in scroll/search
+        # filters. Without these, every filter call 400s with
+        # "Index required but not found for X". Creating an already-existing
+        # index is a no-op on the server but raises here, so we swallow.
+        for field, schema in (
+            ("user_id", PayloadSchemaType.KEYWORD),
+            ("source", PayloadSchemaType.KEYWORD),
+            ("created_at_ts", PayloadSchemaType.INTEGER),
+            ("hits", PayloadSchemaType.INTEGER),
+        ):
+            try:
+                await self._client.create_payload_index(
+                    collection_name=self._collection,
+                    field_name=field,
+                    field_schema=schema,
+                )
+                log.info("qdrant.index.created", field=field)
+            except UnexpectedResponse as e:
+                # 409 / "already exists" — fine to ignore.
+                if "already" not in str(e).lower() and "exists" not in str(e).lower():
+                    log.warning("qdrant.index.create_failed", field=field, error=str(e))
+            except Exception as e:
+                log.warning("qdrant.index.create_failed", field=field, error=str(e))
 
     async def add(
         self,
