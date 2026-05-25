@@ -36,7 +36,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     const sb = supabase();
     await sb.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     });
     setSent(true);
   };
