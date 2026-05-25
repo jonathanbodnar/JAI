@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jai-cron",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Run consolidation + scheduled actions every hour at :00
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+
+  "vars": {
+    "JAI_BACKEND_URL": "https://api.ftr.me"
+  },
+
+  // JAI_MCP_SERVER_TOKEN must be set as a secret:
+  //   npx wrangler secret put JAI_MCP_SERVER_TOKEN
+  "observability": {
+    "enabled": true
+  }
+}

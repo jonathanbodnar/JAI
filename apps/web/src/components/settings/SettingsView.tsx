@@ -8,6 +8,7 @@ import { Credentials } from "./Credentials";
 import { Models } from "./Models";
 import { Audit } from "./Audit";
 import { Status } from "./Status";
+import { Automations } from "./Automations";
 import { cn } from "@/lib/cn";
 
 export function SettingsView() {
@@ -27,17 +28,19 @@ export function SettingsView() {
       </header>
       <Tabs.Root value={tab} onValueChange={setTab} className="flex flex-col flex-1 overflow-hidden">
         <Tabs.List className="flex border-b border-[var(--line)] px-3 overflow-x-auto">
-          <T value="status"      active={tab==="status"}>Status</T>
-          <T value="connections" active={tab==="connections"}>Connections</T>
-          <T value="credentials" active={tab==="credentials"}>Credentials</T>
-          <T value="models"      active={tab==="models"}>Models</T>
-          <T value="audit"       active={tab==="audit"}>Audit</T>
+          <T value="status"       active={tab==="status"}>Status</T>
+          <T value="automations"  active={tab==="automations"}>Automations</T>
+          <T value="connections"  active={tab==="connections"}>Connections</T>
+          <T value="credentials"  active={tab==="credentials"}>Credentials</T>
+          <T value="models"       active={tab==="models"}>Models</T>
+          <T value="audit"        active={tab==="audit"}>Audit</T>
         </Tabs.List>
-        <Tabs.Content value="status"      className="flex-1 overflow-auto"><Status /></Tabs.Content>
-        <Tabs.Content value="connections" className="flex-1 overflow-auto"><Connections /></Tabs.Content>
-        <Tabs.Content value="credentials" className="flex-1 overflow-auto"><Credentials /></Tabs.Content>
-        <Tabs.Content value="models"      className="flex-1 overflow-auto"><Models /></Tabs.Content>
-        <Tabs.Content value="audit"       className="flex-1 overflow-auto"><Audit /></Tabs.Content>
+        <Tabs.Content value="status"       className="flex-1 overflow-auto"><Status /></Tabs.Content>
+        <Tabs.Content value="automations"  className="flex-1 overflow-auto"><Automations /></Tabs.Content>
+        <Tabs.Content value="connections"  className="flex-1 overflow-auto"><Connections /></Tabs.Content>
+        <Tabs.Content value="credentials"  className="flex-1 overflow-auto"><Credentials /></Tabs.Content>
+        <Tabs.Content value="models"       className="flex-1 overflow-auto"><Models /></Tabs.Content>
+        <Tabs.Content value="audit"        className="flex-1 overflow-auto"><Audit /></Tabs.Content>
       </Tabs.Root>
     </div>
   );

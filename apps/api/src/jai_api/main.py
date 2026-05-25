@@ -22,6 +22,7 @@ from .routes import (
     notes,
     oauth,
     onboarding,
+    schedule,
     skills,
     status as status_routes,
     tasks,
@@ -80,6 +81,7 @@ app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(status_routes.router, prefix="/status", tags=["status"])
 app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
 app.include_router(context_ingest.router, prefix="/context", tags=["context"])
+app.include_router(schedule.router, prefix="/schedule", tags=["schedule"])
 
 
 @app.get("/health")

@@ -15,6 +15,7 @@ Steps:
   6. Prune Qdrant entries > 7 days old whose salience was never bumped (i.e.
      never re-retrieved). Simple heuristic for v0.1; later: track retrieval
      hits explicitly in payload.
+  7. Execute any due scheduled actions and store results as system messages.
 
 The whole job is idempotent enough — calling twice in a day just produces a
 second summary message.
@@ -140,12 +141,33 @@ async def consolidate_for_user(user_id: str) -> dict:
     finally:
         await qdrant.close()
 
+    # 7. Run due scheduled actions.
+    schedule_results: list[dict] = []
+    try:
+        from .scheduled import run_due_actions
+        schedule_results = await run_due_actions(user_id, sb)
+        if schedule_results:
+            # Write results as system messages so they surface in morning briefing context.
+            for r in schedule_results:
+                if r.get("result") and r["status"] == "ok":
+                    sb.table("messages").insert({
+                        "conversation_id": conv_id,
+                        "user_id": user_id,
+                        "role": "system",
+                        "content": f"[scheduled.{r['action_id'][:8]}] {r['description']}: {r['result']}",
+                        "metadata": {"job": "scheduled_action", "action_id": r["action_id"]},
+                    }).execute()
+            log.info("consolidate.scheduled_ran", count=len(schedule_results))
+    except Exception as e:
+        log.warning("consolidate.scheduled_failed", error=str(e))
+
     return {
         "ok": True,
         "summary_len": len(summary),
         "fact_count": len(facts),
         "reflection_emitted": bool(reflection_note),
         "qdrant_pruned": pruned,
+        "scheduled_ran": len(schedule_results),
     }
 
 
