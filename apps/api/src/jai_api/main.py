@@ -8,8 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-import jwt as pyjwt
-
+from .auth import _decode as decode_supabase_jwt
 from .config import get_settings
 from .graph.builder import build_graph, close_graph
 from .mcp_server.context import set_user_id
@@ -106,19 +105,13 @@ if _internal_mcp is not None:
             tok = expected_token()
             if tok and got == tok:
                 user_id = settings.jai_user_id or None
-            else:
-                # Try Supabase JWT
-                if settings.supabase_jwt_secret and got:
-                    try:
-                        claims = pyjwt.decode(
-                            got,
-                            settings.supabase_jwt_secret,
-                            algorithms=["HS256"],
-                            audience="authenticated",
-                        )
-                        user_id = claims.get("sub")
-                    except pyjwt.PyJWTError:
-                        user_id = None
+            elif got:
+                # Try Supabase JWT (handles both HS256 and ES256/RS256).
+                try:
+                    claims = decode_supabase_jwt(got, settings)
+                    user_id = claims.get("sub")
+                except Exception:
+                    user_id = None
 
             if not user_id:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
