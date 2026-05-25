@@ -4,6 +4,7 @@ import * as Tabs from "@radix-ui/react-tabs";
 import { ContextGraph } from "./ContextGraph";
 import { ContextDocs } from "./ContextDocs";
 import { ContextSkills } from "./ContextSkills";
+import { ContextUpload } from "./ContextUpload";
 import { cn } from "@/lib/cn";
 
 export function ContextView() {
@@ -17,13 +18,15 @@ export function ContextView() {
         </p>
       </header>
       <Tabs.Root value={tab} onValueChange={setTab} className="flex flex-col flex-1 overflow-hidden">
-        <Tabs.List className="flex border-b border-[var(--line)] px-3">
+        <Tabs.List className="flex border-b border-[var(--line)] px-3 overflow-x-auto">
           <TabTrigger value="graph"  active={tab==="graph"}>Graph</TabTrigger>
           <TabTrigger value="docs"   active={tab==="docs"}>Docs</TabTrigger>
+          <TabTrigger value="upload" active={tab==="upload"}>Upload</TabTrigger>
           <TabTrigger value="skills" active={tab==="skills"}>Skills</TabTrigger>
         </Tabs.List>
         <Tabs.Content value="graph"  className="flex-1 overflow-hidden"><ContextGraph /></Tabs.Content>
         <Tabs.Content value="docs"   className="flex-1 overflow-auto"><ContextDocs /></Tabs.Content>
+        <Tabs.Content value="upload" className="flex-1 overflow-auto"><ContextUpload /></Tabs.Content>
         <Tabs.Content value="skills" className="flex-1 overflow-auto"><ContextSkills /></Tabs.Content>
       </Tabs.Root>
     </div>
