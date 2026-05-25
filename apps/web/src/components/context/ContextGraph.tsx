@@ -10,7 +10,8 @@ import {
   type Edge,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 type GraphDump = {
   nodes: { id: string; label: string; name: string; props: Record<string, unknown> }[];
@@ -30,17 +31,60 @@ const labelColors: Record<string, string> = {
 };
 
 export function ContextGraph() {
-  const { data, error, isLoading } = useSWR<GraphDump>("/skills/_context/graph", (k: string) => api(k));
+  const { data, error, isLoading, mutate } = useSWR<GraphDump>(
+    "/context/graph",
+    (k: string) => api(k),
+  );
+  const [rebuilding, setRebuilding] = useState(false);
 
   const { nodes, edges } = useMemo(() => layout(data), [data]);
+
+  const rebuild = async () => {
+    if (rebuilding) return;
+    setRebuilding(true);
+    try {
+      await api("/context/graph/rebuild", { method: "POST" });
+      // Poll a couple of times so the new nodes show up without a manual reload.
+      for (const ms of [4000, 8000, 16000]) {
+        await new Promise((r) => setTimeout(r, ms));
+        await mutate();
+      }
+    } finally {
+      setRebuilding(false);
+    }
+  };
 
   if (error) return <Empty msg={`Graph unavailable: ${(error as Error).message}`} />;
   if (isLoading) return <Empty msg="Loading graph…" />;
   if (!data || data.nodes.length === 0)
-    return <Empty msg="Your identity graph is empty. Have a conversation — entities, people, decisions and beliefs will appear here." />;
+    return (
+      <Empty
+        msg="Your identity graph is empty."
+        action={
+          <button
+            onClick={rebuild}
+            disabled={rebuilding}
+            className="mt-3 text-xs px-3 py-1.5 rounded-full bg-[var(--accent)] text-white disabled:opacity-50 flex items-center gap-1.5 mx-auto"
+          >
+            <RefreshCw size={12} className={rebuilding ? "animate-spin" : ""} />
+            {rebuilding ? "Extracting entities…" : "Build from ingested docs"}
+          </button>
+        }
+        hint="Or have a conversation — entities will populate as you talk."
+      />
+    );
 
   return (
-    <div className="h-full w-full">
+    <div className="h-full w-full relative">
+      <button
+        onClick={rebuild}
+        disabled={rebuilding}
+        className="absolute top-2 right-2 z-10 text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-elev2)] border border-[var(--line)] text-[var(--fg-mute)] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
+        title="Re-run entity extraction over all ingested docs"
+      >
+        <RefreshCw size={11} className={rebuilding ? "animate-spin" : ""} />
+        {rebuilding ? "Rebuilding…" : "Rebuild"}
+      </button>
       <ReactFlow nodes={nodes} edges={edges} fitView>
         <Background gap={20} />
         <Controls position="bottom-right" />
@@ -81,10 +125,20 @@ function layout(data?: GraphDump): { nodes: Node[]; edges: Edge[] } {
   return { nodes, edges };
 }
 
-function Empty({ msg }: { msg: string }) {
+function Empty({
+  msg,
+  hint,
+  action,
+}: {
+  msg: string;
+  hint?: string;
+  action?: React.ReactNode;
+}) {
   return (
-    <div className="h-full flex items-center justify-center text-center text-sm text-[var(--fg-mute)] px-8">
-      {msg}
+    <div className="h-full flex flex-col items-center justify-center text-center text-sm text-[var(--fg-mute)] px-8">
+      <div>{msg}</div>
+      {hint && <div className="text-xs mt-1 opacity-80">{hint}</div>}
+      {action}
     </div>
   );
 }

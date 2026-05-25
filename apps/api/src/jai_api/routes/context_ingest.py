@@ -29,6 +29,7 @@ from ..auth import CurrentUserDep
 from ..audit import write as audit_write
 from ..db import supabase_admin
 from ..memory.mem0 import JaiMem0
+from ..memory.neo4j_client import JaiNeo4j
 from ..memory.qdrant import JaiQdrant
 
 log = structlog.get_logger()
@@ -175,6 +176,165 @@ def _chunk(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> 
 
 
 # --- fact extraction -----------------------------------------------------
+
+
+async def _extract_entities(text: str) -> dict[str, Any]:
+    """Pull entities + relationships out of a blob (best-effort).
+
+    Returns shape:
+      {
+        "people":   [{"name": "...", "role": "..."}, ...],
+        "companies":[{"name": "...", "note": "..."}, ...],
+        "projects": [{"name": "...", "note": "..."}, ...],
+        "beliefs":  [{"text": "..."}, ...],
+        "topics":   [{"name": "..."}, ...],
+        "relations":[{"src": "...", "rel": "WORKS_WITH", "dst": "..."}, ...],
+      }
+    """
+    if not text.strip():
+        return {}
+    try:
+        from ..config import get_settings
+        from ..models.openrouter import openrouter_chat
+
+        s = get_settings()
+        llm = openrouter_chat(
+            model=s.jai_model_orchestrator,
+            settings=s,
+            temperature=0.0,
+            streaming=False,
+        )
+        prompt = (
+            "Extract entities and relationships from the text. Return STRICT JSON "
+            'matching this shape (no prose, no markdown fences):\n'
+            "{\n"
+            '  "people": [{"name": str, "role": str|null}],\n'
+            '  "companies": [{"name": str, "note": str|null}],\n'
+            '  "projects": [{"name": str, "note": str|null}],\n'
+            '  "beliefs": [{"text": str}],\n'
+            '  "topics": [{"name": str}],\n'
+            '  "relations": [{"src": str, "rel": str, "dst": str}]\n'
+            "}\n"
+            "Rules: include only entities clearly mentioned. Use SCREAMING_SNAKE_CASE "
+            'for relation types (e.g. "WORKS_WITH", "FOUNDED", "BELIEVES").\n'
+            "If a category is empty, return [].\n\n"
+            "TEXT:\n"
+            f"{text[:12000]}"
+        )
+        resp = await llm.ainvoke(prompt)
+        raw = str(resp.content or "").strip()
+
+        # Tolerate accidental code fences.
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].lstrip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Try to slice out the first {...} block.
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(raw[start : end + 1])
+                except json.JSONDecodeError:
+                    return {}
+            else:
+                return {}
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        log.warning("ingest.entity_extract_failed", error=str(e))
+        return {}
+
+
+def _slug(s: str) -> str:
+    """Stable slug for entity ids derived from names."""
+    return "".join(c if c.isalnum() else "_" for c in s.lower()).strip("_")[:80] or "x"
+
+
+async def _write_to_neo4j(user_id: str, ents: dict[str, Any]) -> tuple[int, int]:
+    """Upsert extracted entities and relations. Returns (nodes, edges) written."""
+    if not ents:
+        return 0, 0
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        log.warning("neo4j.init_failed", error=str(e))
+        return 0, 0
+
+    nodes = 0
+    edges = 0
+    name_to_label: dict[str, str] = {}
+
+    async def upsert_collection(items: list[dict[str, Any]] | None, label: str) -> int:
+        if not isinstance(items, list):
+            return 0
+        count = 0
+        for it in items:
+            name = (it or {}).get("name") if label != "Belief" else (it or {}).get("text")
+            if not name or not isinstance(name, str):
+                continue
+            entity_id = f"{label.lower()}_{_slug(name)}"
+            props: dict[str, Any] = {"name": name}
+            # Merge any extra optional fields (role/note) without clobbering.
+            for k, v in (it or {}).items():
+                if k != "name" and v is not None:
+                    props[k] = v
+            try:
+                await n4.upsert_entity(
+                    user_id=user_id, label=label, entity_id=entity_id, properties=props
+                )
+                name_to_label[name.lower()] = (label, entity_id)  # type: ignore[assignment]
+                count += 1
+            except Exception as e:
+                log.warning("neo4j.upsert_node_failed", label=label, error=str(e))
+        return count
+
+    try:
+        nodes += await upsert_collection(ents.get("people"), "Person")
+        nodes += await upsert_collection(ents.get("companies"), "Company")
+        nodes += await upsert_collection(ents.get("projects"), "Project")
+        nodes += await upsert_collection(ents.get("beliefs"), "Belief")
+        nodes += await upsert_collection(ents.get("topics"), "Topic")
+
+        for rel in ents.get("relations") or []:
+            src_name = (rel or {}).get("src")
+            dst_name = (rel or {}).get("dst")
+            rel_type = (rel or {}).get("rel")
+            if not (
+                isinstance(src_name, str)
+                and isinstance(dst_name, str)
+                and isinstance(rel_type, str)
+            ):
+                continue
+            # Sanitize rel type — Cypher relationship types must be identifiers.
+            rel_safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in rel_type).upper()
+            if not rel_safe or rel_safe[0].isdigit():
+                rel_safe = f"R_{rel_safe}"
+            src = name_to_label.get(src_name.lower())
+            dst = name_to_label.get(dst_name.lower())
+            if not (src and dst):
+                continue
+            try:
+                await n4.upsert_rel(
+                    user_id=user_id,
+                    src_label=src[0],
+                    src_id=src[1],
+                    rel_type=rel_safe,
+                    dst_label=dst[0],
+                    dst_id=dst[1],
+                )
+                edges += 1
+            except Exception as e:
+                log.warning("neo4j.upsert_rel_failed", error=str(e))
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
+
+    return nodes, edges
 
 
 async def _extract_facts(text: str, max_facts: int = 12) -> list[str]:
@@ -326,6 +486,20 @@ async def _process_one(
                     facts_count = len(facts)
                 except Exception as e:
                     log.warning("ingest.mem0_add_failed", error=str(e))
+
+            # Entity extraction → Neo4j (the identity graph)
+            try:
+                ents = await _extract_entities(plain_text)
+                if ents:
+                    nodes_w, edges_w = await _write_to_neo4j(user_id, ents)
+                    log.info(
+                        "ingest.graph_populated",
+                        filename=filename,
+                        nodes=nodes_w,
+                        edges=edges_w,
+                    )
+            except Exception as e:
+                log.warning("ingest.graph_failed", error=str(e))
 
         sb.table("documents").update(
             {
@@ -491,6 +665,96 @@ async def delete_document(user: CurrentUserDep, doc_id: str) -> dict[str, Any]:
     sb = supabase_admin()
     sb.table("documents").delete().eq("user_id", user.user_id).eq("id", doc_id).execute()
     return {"ok": True}
+
+
+@router.post("/graph/rebuild")
+async def graph_rebuild(
+    user: CurrentUserDep, background: BackgroundTasks
+) -> dict[str, Any]:
+    """Re-run entity extraction over every previously-ingested chunk in Qdrant
+    and seed the Neo4j graph. Idempotent — MERGE-based upserts in Cypher mean
+    repeated runs converge instead of duplicating."""
+
+    async def _rebuild() -> None:
+        qd = JaiQdrant()
+        try:
+            await qd.ensure_collection()
+        except Exception as e:
+            log.warning("graph.rebuild.qdrant_init_failed", error=str(e))
+            return
+
+        # Pull this user's chunks in pages; concatenate per source-doc so we
+        # extract entities at document scope rather than chunk scope.
+        try:
+            from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+            flt = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user.user_id))])
+            buckets: dict[str, list[str]] = {}
+            offset = None
+            for _ in range(50):  # safety: max 50 pages of 200 = 10k chunks
+                pts, offset = await qd._client.scroll(  # noqa: SLF001
+                    collection_name=qd._collection,  # noqa: SLF001
+                    scroll_filter=flt,
+                    limit=200,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for p in pts:
+                    payload = p.payload or {}
+                    src = payload.get("source") or payload.get("filename") or "untagged"
+                    text = payload.get("text") or ""
+                    if text:
+                        buckets.setdefault(src, []).append(text)
+                if not offset:
+                    break
+
+            total_nodes = 0
+            total_edges = 0
+            for src, chunks in buckets.items():
+                joined = "\n\n".join(chunks)[:12000]
+                ents = await _extract_entities(joined)
+                if not ents:
+                    continue
+                n, e = await _write_to_neo4j(user.user_id, ents)
+                total_nodes += n
+                total_edges += e
+                log.info("graph.rebuild.doc", source=src, nodes=n, edges=e)
+
+            await audit_write(
+                user_id=user.user_id,
+                actor="context",
+                action="context.graph.rebuild",
+                payload={"docs": len(buckets), "nodes": total_nodes, "edges": total_edges},
+            )
+        finally:
+            try:
+                await qd.close()
+            except Exception:
+                pass
+
+    background.add_task(_rebuild)
+    return {"ok": True, "status": "rebuilding"}
+
+
+@router.get("/graph")
+async def graph(user: CurrentUserDep, limit: int = 200) -> dict[str, Any]:
+    """Return the user's identity graph (Neo4j Aura) for the Context → Graph view."""
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        # Don't 500 the UI; return empty so the empty-state copy shows.
+        log.warning("graph.init_failed", error=str(e))
+        return {"nodes": [], "edges": []}
+    try:
+        return await n4.graph_dump(user.user_id, limit=min(max(limit, 1), 500))
+    except Exception as e:
+        log.warning("graph.dump_failed", error=str(e))
+        return {"nodes": [], "edges": []}
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
 
 
 @router.post("/search", response_model=list[SearchHit])
