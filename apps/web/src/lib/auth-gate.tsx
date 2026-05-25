@@ -34,9 +34,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   const send = async () => {
     const sb = supabase();
+    // Prefer NEXT_PUBLIC_SITE_URL so magic links always land on production,
+    // even when sent from a localhost dev tab. Falls back to current origin
+    // for fresh local-only setups.
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
     await sb.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+      options: { emailRedirectTo: `${siteUrl}/auth/callback` },
     });
     setSent(true);
   };
