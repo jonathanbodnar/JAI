@@ -21,11 +21,9 @@ class JaiMem0:
             log.warning("mem0.disabled", reason="no api key")
             self._client = None
             return
-        self._client = MemoryClient(
-            api_key=s.mem0_api_key,
-            org_id=s.mem0_org_id or None,
-            project_id=s.mem0_project_id or None,
-        )
+        # mem0ai v2 dropped org_id / project_id from the constructor; both are
+        # inferred from the API key's account context.
+        self._client = MemoryClient(api_key=s.mem0_api_key)
         self._top_k = s.mem0_top_k
 
     @property
