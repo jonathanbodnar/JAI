@@ -33,6 +33,21 @@ class BuiltinHit:
 
 
 # Strip a polite preamble so "Can you add a task to X" still hits add_task.
+_MORNING_RE = re.compile(
+    r"^\s*(?:"
+    r"good\s*morning|morning|gm|good\s*day|"
+    r"(?:hey|hi|hello|sup)(?:\s+jai)?|"
+    r"what['\u2019]?s?\s+up|"
+    # "what's on today/this week/my plate/my agenda"
+    r"what(?:['\u2019]s|\s+is)\s+(?:on\s+)?(?:my\s+)?(?:today|agenda|schedule|calendar|todo|to-?do|plate)|"
+    r"what\s+do\s+i\s+have\s+(?:today|on|planned)|"
+    r"(?:show|give|tell)\s+me\s+my\s+(?:tasks?|todos?|agenda|schedule|day|list)|"
+    r"what(?:['\u2019]s|\s+should|\s+do)\s+i\s+(?:need\s+to\s+)?(?:do|focus\s+on)\s+today|"
+    r"(?:any|what)\s+tasks?\s+(?:for\s+)?today"
+    r")[\s?!.]*$",
+    re.IGNORECASE,
+)
+
 _LEAD_RE = re.compile(
     r"^\s*(?:"
     r"hey\s+(?:jai|j[ae])\s*[,\-:!.]*\s*|"
@@ -76,14 +91,18 @@ def _strip_lead(text: str) -> str:
 
 async def try_builtin(*, user_id: str, text: str) -> BuiltinHit | None:
     stripped = _strip_lead(text)
-    # Drop a trailing question mark — "add a task to X?" is still a task.
-    stripped = stripped.rstrip("?!. ").strip() or stripped
-    m = _NOTE_RE.match(stripped)
+    stripped_clean = stripped.rstrip("?!. ").strip() or stripped
+
+    # Morning briefing — "good morning", "what's on today?", etc.
+    if _MORNING_RE.match(text.strip()):
+        return await _morning_briefing(user_id=user_id, text=text.strip())
+
+    m = _NOTE_RE.match(stripped_clean)
     if m:
         body = _clean_title(m.group("body"))
         if body:
             return await _add_note(user_id=user_id, body=body)
-    m = _TASK_RE.match(stripped)
+    m = _TASK_RE.match(stripped_clean)
     if m:
         title = _clean_title(m.group("title"))
         if title:
@@ -97,6 +116,69 @@ def _clean_title(s: str) -> str:
     if s.lower().startswith("to "):
         s = s[3:].strip()
     return s
+
+
+async def _morning_briefing(*, user_id: str, text: str) -> BuiltinHit:
+    """Fetch open tasks and return a formatted morning rundown."""
+    from datetime import datetime, timezone
+    sb = supabase_admin()
+
+    # Get open tasks (across all lists, not done, not deleted)
+    tasks_res = (
+        sb.table("tasks")
+        .select("title, due, notes")
+        .eq("user_id", user_id)
+        .neq("status", "completed")
+        .order("due", desc=False, nullsfirst=False)
+        .limit(20)
+        .execute()
+    )
+    tasks = tasks_res.data or []
+
+    now = datetime.now(timezone.utc)
+    greeting = "Good morning" if now.hour < 12 else ("Good afternoon" if now.hour < 18 else "Hey")
+
+    if not tasks:
+        response = (
+            f"{greeting}. Your task list is clear — nothing open right now. "
+            "Want to add something?"
+        )
+    else:
+        lines = []
+        overdue, due_today, upcoming = [], [], []
+        today_str = now.date().isoformat()
+        for t in tasks:
+            due = (t.get("due") or "")[:10]
+            if due and due < today_str:
+                overdue.append(t)
+            elif due == today_str:
+                due_today.append(t)
+            else:
+                upcoming.append(t)
+
+        if overdue:
+            lines.append(f"**Overdue ({len(overdue)})**")
+            for t in overdue:
+                lines.append(f"- {t['title']}")
+        if due_today:
+            lines.append(f"**Due today ({len(due_today)})**")
+            for t in due_today:
+                lines.append(f"- {t['title']}")
+        if upcoming:
+            lines.append(f"**Upcoming ({len(upcoming)})**")
+            for t in upcoming[:10]:
+                label = t["title"]
+                if t.get("due"):
+                    label += f" — {t['due'][:10]}"
+                lines.append(f"- {label}")
+
+        total = len(tasks)
+        response = (
+            f"{greeting}. Here's your task rundown ({total} open):\n\n"
+            + "\n".join(lines)
+        )
+
+    return BuiltinHit(kind="morning_briefing", response=response, record_id=None)
 
 
 async def _add_note(*, user_id: str, body: str) -> BuiltinHit:
