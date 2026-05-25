@@ -7,6 +7,10 @@ incoming text; if any matches, we execute directly against Supabase.
 Currently supported:
   - add_note   ("add a note: <body>", "note: <body>", "take a note: <body>")
   - add_task   ("remind me to <thing>", "add to my todo: <thing>", "todo: <thing>")
+
+Polite/conversational lead-ins ("can you", "could you", "please", "hey jai",
+etc.) are stripped before matching so the user doesn't have to talk like a
+CLI parser.
 """
 
 from __future__ import annotations
@@ -28,24 +32,71 @@ class BuiltinHit:
     record_id: str | None
 
 
+# Strip a polite preamble so "Can you add a task to X" still hits add_task.
+_LEAD_RE = re.compile(
+    r"^\s*(?:"
+    r"hey\s+(?:jai|j[ae])\s*[,\-:!.]*\s*|"
+    r"(?:please\s+)?(?:can|could|would|will|do)\s+you\s+(?:please\s+)?|"
+    r"please\s+|pls\s+|"
+    r"i\s+(?:need|want|would\s+like)\s+(?:you\s+)?to\s+|"
+    r"go\s+ahead\s+and\s+|"
+    r"(?:would|can)\s+you\s+mind(?:\s+if\s+i\s+ask\s+you)?\s+to\s+"
+    r")",
+    re.IGNORECASE,
+)
+
+# After stripping politeness, match if the text begins with any of these.
+# We accept "to" or "that" as a soft connector ("add a task to check on X").
 _NOTE_RE = re.compile(
-    r"^\s*(?:add\s+a\s+note|take\s+a\s+note|note|jot\s+down|save\s+as\s+a?\s*note)\s*[:\-]\s*(?P<body>.+)$",
+    r"^\s*(?:add\s+a\s+note|take\s+a\s+note|note|jot\s+down|save\s+as\s+a?\s*note|"
+    r"make\s+a\s+note(?:\s+of)?|write\s+(?:that\s+)?down|capture\s+(?:this|that))"
+    r"(?:\s+(?:that|about|on|of|for))?\s*[:\-,]?\s*(?P<body>.+)$",
     re.IGNORECASE | re.DOTALL,
 )
 _TASK_RE = re.compile(
-    r"^\s*(?:remind\s+me\s+to|todo|to-?do|add\s+(?:a\s+)?(?:task|todo)|put\s+on\s+my\s+(?:list|todo))\s*[:\-]?\s*(?P<title>.+)$",
+    r"^\s*(?:remind\s+me\s+to|todo|to-?do|add\s+(?:a\s+)?(?:task|todo|to-?do)|"
+    r"put\s+on\s+my\s+(?:list|todo)|"
+    r"create\s+(?:a\s+)?(?:task|todo)|new\s+(?:task|todo))"
+    r"(?:\s+(?:to|that|about|for))?\s*[:\-,]?\s*(?P<title>.+)$",
     re.IGNORECASE | re.DOTALL,
 )
 
 
+def _strip_lead(text: str) -> str:
+    """Peel one polite preamble (or two — 'please can you...')."""
+    prev = None
+    cur = text.strip()
+    for _ in range(3):  # at most "please can you please" type chains
+        prev = cur
+        cur = _LEAD_RE.sub("", cur, count=1).strip()
+        if cur == prev:
+            break
+    return cur
+
+
 async def try_builtin(*, user_id: str, text: str) -> BuiltinHit | None:
-    m = _NOTE_RE.match(text)
+    stripped = _strip_lead(text)
+    # Drop a trailing question mark — "add a task to X?" is still a task.
+    stripped = stripped.rstrip("?!. ").strip() or stripped
+    m = _NOTE_RE.match(stripped)
     if m:
-        return await _add_note(user_id=user_id, body=m.group("body").strip())
-    m = _TASK_RE.match(text)
+        body = _clean_title(m.group("body"))
+        if body:
+            return await _add_note(user_id=user_id, body=body)
+    m = _TASK_RE.match(stripped)
     if m:
-        return await _add_task(user_id=user_id, title=m.group("title").strip())
+        title = _clean_title(m.group("title"))
+        if title:
+            return await _add_task(user_id=user_id, title=title)
     return None
+
+
+def _clean_title(s: str) -> str:
+    s = s.strip().rstrip("?!.,;: ").strip()
+    # Drop a leading "to " left over after the connector was consumed.
+    if s.lower().startswith("to "):
+        s = s[3:].strip()
+    return s
 
 
 async def _add_note(*, user_id: str, body: str) -> BuiltinHit:
