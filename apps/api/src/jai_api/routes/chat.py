@@ -81,6 +81,15 @@ async def chat_ws(ws: WebSocket, user: CurrentUser = Depends(_ws_user)):
 
             mtype = msg.get("type")
 
+            if mtype == "ping":
+                # Keepalive from the client so Cloudflare / Railway don't
+                # reap the socket as idle (~60s by default).
+                try:
+                    await ws.send_json({"type": "pong"})
+                except Exception:
+                    pass
+                continue
+
             if mtype == "user_audio_start":
                 audio_buffer = BytesIO()
                 expecting_audio = True

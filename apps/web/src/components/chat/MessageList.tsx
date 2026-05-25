@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export type Message = {
   id: string;
@@ -40,10 +42,10 @@ function Bubble({ m }: { m: Message }) {
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[80%] rounded-2xl px-4 py-2.5 text-[15px] leading-snug whitespace-pre-wrap",
+          "max-w-[85%] rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed",
           isUser
-            ? "bg-[var(--accent)] text-white rounded-br-md"
-            : "bg-[var(--bg-elev2)] text-[var(--fg)] rounded-bl-md"
+            ? "bg-[var(--accent)] text-white rounded-br-md whitespace-pre-wrap"
+            : "bg-[var(--bg-elev2)] text-[var(--fg)] rounded-bl-md",
         )}
       >
         {!isUser && m.agent && m.agent !== "orchestrator" && (
@@ -51,8 +53,48 @@ function Bubble({ m }: { m: Message }) {
             {m.agent}
           </div>
         )}
-        {m.text}
+        {isUser ? m.text : <Markdown text={m.text} />}
       </div>
+    </div>
+  );
+}
+
+function Markdown({ text }: { text: string }) {
+  return (
+    <div
+      className="
+        prose-chat
+        [&_p]:my-1.5 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0
+        [&_ul]:my-1.5 [&_ul]:pl-5 [&_ul]:list-disc
+        [&_ol]:my-1.5 [&_ol]:pl-5 [&_ol]:list-decimal
+        [&_li]:my-0.5 [&_li_p]:my-0
+        [&_h1]:text-base [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mb-1.5
+        [&_h2]:text-[15px] [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1
+        [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-2 [&_h3]:mb-1
+        [&_strong]:font-semibold [&_em]:italic
+        [&_a]:text-[var(--accent)] [&_a]:underline [&_a]:underline-offset-2
+        [&_code]:bg-black/30 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-[13px] [&_code]:font-mono
+        [&_pre]:bg-black/40 [&_pre]:p-2.5 [&_pre]:rounded-lg [&_pre]:my-2 [&_pre]:overflow-x-auto
+        [&_pre>code]:bg-transparent [&_pre>code]:p-0 [&_pre>code]:text-[12.5px] [&_pre>code]:leading-snug
+        [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--line)] [&_blockquote]:pl-2.5 [&_blockquote]:text-[var(--fg-mute)] [&_blockquote]:my-1.5
+        [&_hr]:border-[var(--line)] [&_hr]:my-2
+        [&_table]:my-2 [&_table]:text-sm [&_table]:border-collapse
+        [&_th]:border [&_th]:border-[var(--line)] [&_th]:px-2 [&_th]:py-1 [&_th]:bg-black/20 [&_th]:text-left
+        [&_td]:border [&_td]:border-[var(--line)] [&_td]:px-2 [&_td]:py-1
+      "
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer">
+              {children}
+            </a>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }
