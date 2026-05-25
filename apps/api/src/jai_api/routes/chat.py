@@ -21,9 +21,9 @@ import base64
 from io import BytesIO
 
 import structlog
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 
-from ..auth import CurrentUser, get_current_user
+from ..auth import CurrentUser, CurrentUserDep, get_current_user
 from ..db import supabase_admin
 from ..voice.stt import STT
 from ..voice.tts import TTS
@@ -34,6 +34,44 @@ router = APIRouter()
 
 def _ws_user(token: str | None = Query(default=None)) -> CurrentUser:
     return get_current_user(authorization=f"Bearer {token}" if token else None)
+
+
+@router.post("/reset")
+async def reset_conversation(request: Request, user: CurrentUserDep) -> dict:
+    """Wipe the LangGraph checkpoint for this user.
+
+    The orchestrator's working window is keyed on `thread_id == user_id`,
+    so when the user says "clear chat" we drop every checkpoint row tied
+    to that thread. Otherwise the LLM keeps drafting replies based on
+    stale history (e.g. asking for a Todoist token that no longer
+    applies).
+    """
+    graph = request.app.state.graph
+    pool = getattr(graph, "pool", None)
+    if pool is None:
+        # No checkpointer configured — nothing to clear.
+        return {"ok": True, "cleared": 0, "note": "no checkpointer"}
+    deleted = 0
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # AsyncPostgresSaver creates these three tables; clearing
+                # them by thread_id resets the entire conversation memory.
+                for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                    try:
+                        await cur.execute(
+                            f"DELETE FROM {table} WHERE thread_id = %s",
+                            (user.user_id,),
+                        )
+                        deleted += cur.rowcount or 0
+                    except Exception as e:
+                        log.warning("chat.reset.delete_failed", table=table, error=str(e))
+            await conn.commit()
+    except Exception as e:
+        log.warning("chat.reset.failed", error=str(e))
+        return {"ok": False, "cleared": deleted, "error": str(e)}
+    log.info("chat.reset.done", user=user.user_id[:8], deleted=deleted)
+    return {"ok": True, "cleared": deleted}
 
 
 @router.websocket("/ws")

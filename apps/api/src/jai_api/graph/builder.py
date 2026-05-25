@@ -12,6 +12,7 @@ from ..memory.mem0 import JaiMem0
 from ..memory.neo4j_client import JaiNeo4j
 from ..memory.qdrant import JaiQdrant
 from .checkpointer import make_checkpointer
+from .nodes.fast_intent import fast_intent
 from .nodes.ingest import ingest
 from .nodes.orchestrator import orchestrator
 from .nodes.persist_memory import make_persist
@@ -46,6 +47,13 @@ def _route_after_orchestrator(state: JaiState) -> str:
     }.get(r, "persist")
 
 
+def _route_after_fast_intent(state: JaiState) -> str:
+    """If fast_intent set final_text via a builtin, skip everything else."""
+    if state.get("final_text") and state.get("role_used", "").startswith("builtin:"):
+        return "persist"
+    return "retrieve"
+
+
 async def build_graph(settings: Settings) -> JaiGraph:
     mem0 = JaiMem0(settings)
     qdrant = JaiQdrant(settings)
@@ -62,6 +70,7 @@ async def build_graph(settings: Settings) -> JaiGraph:
 
     g: StateGraph = StateGraph(JaiState)
     g.add_node("ingest", ingest)
+    g.add_node("fast_intent", fast_intent)
     g.add_node("retrieve", retrieve)
     g.add_node("orchestrator", orchestrator)
     g.add_node("reflect", reflect)
@@ -71,7 +80,13 @@ async def build_graph(settings: Settings) -> JaiGraph:
     g.add_node("persist", persist)
 
     g.add_edge(START, "ingest")
-    g.add_edge("ingest", "retrieve")
+    g.add_edge("ingest", "fast_intent")
+    # Skip retrieve+orchestrator when a builtin already handled the turn.
+    g.add_conditional_edges(
+        "fast_intent",
+        _route_after_fast_intent,
+        {"persist": "persist", "retrieve": "retrieve"},
+    )
     g.add_edge("retrieve", "orchestrator")
     g.add_conditional_edges(
         "orchestrator",

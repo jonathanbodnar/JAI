@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatSocket, type ServerMsg } from "@/lib/ws";
 import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
+import { api } from "@/lib/api";
 import Link from "next/link";
 import { Settings, Trash2 } from "lucide-react";
 import { MessageList, type Message } from "./MessageList";
@@ -147,13 +148,24 @@ export function ChatView() {
           </div>
           {messages.length > 0 && (
             <button
-              onClick={() => {
-                if (confirm("Clear local chat view? Conversation history in memory is unaffected."))
-                  setMessages([]);
+              onClick={async () => {
+                if (
+                  !confirm(
+                    "Clear this chat and reset JAI's working memory? " +
+                      "Identity facts (Mem0) and your uploaded context (Qdrant / graph) are kept.",
+                  )
+                )
+                  return;
+                setMessages([]);
+                try {
+                  await api("/chat/reset", { method: "POST" });
+                } catch (e) {
+                  console.warn("chat reset failed", e);
+                }
               }}
               aria-label="Clear chat"
               className="text-[var(--fg-mute)] hover:text-white"
-              title="Clear local chat view"
+              title="Clear chat + reset JAI's working memory"
             >
               <Trash2 size={16} />
             </button>
