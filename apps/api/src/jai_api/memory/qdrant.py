@@ -123,16 +123,21 @@ class JaiQdrant:
 
     async def search(self, user_id: str, query: str) -> list[dict]:
         emb = await self._embed.aembed_query(query)
-        results = await self._client.search(
+        # qdrant-client >=1.14 removed `.search()` in favour of `.query_points()`.
+        # The new API returns a `QueryResponse` whose `.points` is the
+        # equivalent of the old `ScoredPoint[]`.
+        resp = await self._client.query_points(
             collection_name=self._collection,
-            query_vector=emb,
+            query=emb,
             limit=self._top_k,
             query_filter=Filter(
                 must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
             ),
+            with_payload=True,
         )
+        results = resp.points
         out = [
-            {"text": r.payload.get("text", ""), "score": r.score, "metadata": r.payload, "_id": r.id}
+            {"text": (r.payload or {}).get("text", ""), "score": r.score, "metadata": r.payload or {}, "_id": r.id}
             for r in results
         ]
         # Fire-and-forget salience bump.

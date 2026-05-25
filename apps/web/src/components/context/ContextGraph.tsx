@@ -36,19 +36,53 @@ export function ContextGraph() {
     (k: string) => api(k),
   );
   const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildMsg, setRebuildMsg] = useState<string | null>(null);
 
   const { nodes, edges } = useMemo(() => layout(data), [data]);
 
   const rebuild = async () => {
     if (rebuilding) return;
     setRebuilding(true);
+    setRebuildMsg(null);
     try {
-      await api("/context/graph/rebuild", { method: "POST" });
-      // Poll a couple of times so the new nodes show up without a manual reload.
-      for (const ms of [4000, 8000, 16000]) {
-        await new Promise((r) => setTimeout(r, ms));
+      // The endpoint processes up to 8 docs per call so it fits inside
+      // Railway's ~100s HTTP budget. We loop until `remaining === 0`.
+      let totalNodes = 0;
+      let totalEdges = 0;
+      let totalDocs = 0;
+      let scannedChunks = 0;
+      for (let i = 0; i < 6; i++) {
+        const r = (await api("/context/graph/rebuild", { method: "POST" })) as {
+          docs_processed: number;
+          docs_total: number;
+          chunks_scanned: number;
+          nodes_written: number;
+          edges_written: number;
+          remaining: number;
+          skipped: string[];
+        };
+        totalNodes += r.nodes_written || 0;
+        totalEdges += r.edges_written || 0;
+        totalDocs += r.docs_processed || 0;
+        scannedChunks = Math.max(scannedChunks, r.chunks_scanned || 0);
         await mutate();
+        if (!r.remaining) break;
       }
+      if (scannedChunks === 0) {
+        setRebuildMsg(
+          "No embedded chunks found yet. Upload a document under Context → Upload first.",
+        );
+      } else if (totalNodes === 0) {
+        setRebuildMsg(
+          `Scanned ${scannedChunks} chunks but the model couldn't pull any entities. Try uploading a denser document (PDF with names, projects, beliefs).`,
+        );
+      } else {
+        setRebuildMsg(
+          `Added ${totalNodes} nodes / ${totalEdges} edges from ${totalDocs} docs.`,
+        );
+      }
+    } catch (err) {
+      setRebuildMsg(`Rebuild failed: ${(err as Error).message}`);
     } finally {
       setRebuilding(false);
     }
@@ -61,14 +95,21 @@ export function ContextGraph() {
       <Empty
         msg="Your identity graph is empty."
         action={
-          <button
-            onClick={rebuild}
-            disabled={rebuilding}
-            className="mt-3 text-xs px-3 py-1.5 rounded-full bg-[var(--accent)] text-white disabled:opacity-50 flex items-center gap-1.5 mx-auto"
-          >
-            <RefreshCw size={12} className={rebuilding ? "animate-spin" : ""} />
-            {rebuilding ? "Extracting entities…" : "Build from ingested docs"}
-          </button>
+          <div className="flex flex-col items-center gap-2 mt-3">
+            <button
+              onClick={rebuild}
+              disabled={rebuilding}
+              className="text-xs px-3 py-1.5 rounded-full bg-[var(--accent)] text-white disabled:opacity-50 flex items-center gap-1.5"
+            >
+              <RefreshCw size={12} className={rebuilding ? "animate-spin" : ""} />
+              {rebuilding ? "Extracting entities…" : "Build from ingested docs"}
+            </button>
+            {rebuildMsg && (
+              <div className="text-[11px] text-[var(--fg-mute)] max-w-xs">
+                {rebuildMsg}
+              </div>
+            )}
+          </div>
         }
         hint="Or have a conversation — entities will populate as you talk."
       />
@@ -76,15 +117,22 @@ export function ContextGraph() {
 
   return (
     <div className="h-full w-full relative">
-      <button
-        onClick={rebuild}
-        disabled={rebuilding}
-        className="absolute top-2 right-2 z-10 text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-elev2)] border border-[var(--line)] text-[var(--fg-mute)] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
-        title="Re-run entity extraction over all ingested docs"
-      >
-        <RefreshCw size={11} className={rebuilding ? "animate-spin" : ""} />
-        {rebuilding ? "Rebuilding…" : "Rebuild"}
-      </button>
+      <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1">
+        <button
+          onClick={rebuild}
+          disabled={rebuilding}
+          className="text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-elev2)] border border-[var(--line)] text-[var(--fg-mute)] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
+          title="Re-run entity extraction over all ingested docs"
+        >
+          <RefreshCw size={11} className={rebuilding ? "animate-spin" : ""} />
+          {rebuilding ? "Rebuilding…" : "Rebuild"}
+        </button>
+        {rebuildMsg && (
+          <div className="text-[10px] text-[var(--fg-mute)] bg-[var(--bg-elev2)] border border-[var(--line)] rounded px-2 py-1 max-w-[220px] text-right">
+            {rebuildMsg}
+          </div>
+        )}
+      </div>
       <ReactFlow nodes={nodes} edges={edges} fitView>
         <Background gap={20} />
         <Controls position="bottom-right" />

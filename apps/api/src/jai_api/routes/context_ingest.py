@@ -487,9 +487,22 @@ async def _process_one(
                 except Exception as e:
                     log.warning("ingest.mem0_add_failed", error=str(e))
 
-            # Entity extraction → Neo4j (the identity graph)
+        # --- entity extraction → Neo4j -------------------------------
+        # Run over BOTH plain text and ChatGPT export bodies so the
+        # identity graph grows from chat-history uploads too. Cap the
+        # input at 12k chars (matches `_extract_entities`).
+        graph_source: list[str] = []
+        if plain_text.strip():
+            graph_source.append(plain_text)
+        if gpt_convos:
+            for c in gpt_convos[:50]:  # cap to keep the prompt sane
+                body = c.get("body") or ""
+                if body:
+                    graph_source.append(body)
+        combined = "\n\n".join(graph_source)[:12000]
+        if combined.strip():
             try:
-                ents = await _extract_entities(plain_text)
+                ents = await _extract_entities(combined)
                 if ents:
                     nodes_w, edges_w = await _write_to_neo4j(user_id, ents)
                     log.info(
@@ -668,72 +681,115 @@ async def delete_document(user: CurrentUserDep, doc_id: str) -> dict[str, Any]:
 
 
 @router.post("/graph/rebuild")
-async def graph_rebuild(
-    user: CurrentUserDep, background: BackgroundTasks
-) -> dict[str, Any]:
+async def graph_rebuild(user: CurrentUserDep) -> dict[str, Any]:
     """Re-run entity extraction over every previously-ingested chunk in Qdrant
     and seed the Neo4j graph. Idempotent — MERGE-based upserts in Cypher mean
-    repeated runs converge instead of duplicating."""
+    repeated runs converge instead of duplicating.
 
-    async def _rebuild() -> None:
-        qd = JaiQdrant()
-        try:
-            await qd.ensure_collection()
-        except Exception as e:
-            log.warning("graph.rebuild.qdrant_init_failed", error=str(e))
-            return
+    Runs synchronously so the UI can report real counts. We cap the number
+    of documents we process per call to keep it under Railway's ~100s
+    response budget; the user can click again to keep going.
+    """
+    qd = JaiQdrant()
+    docs_seen = 0
+    chunks_seen = 0
+    total_nodes = 0
+    total_edges = 0
+    skipped: list[str] = []
 
-        # Pull this user's chunks in pages; concatenate per source-doc so we
-        # extract entities at document scope rather than chunk scope.
-        try:
-            from qdrant_client.http.models import FieldCondition, Filter, MatchValue
-            flt = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user.user_id))])
-            buckets: dict[str, list[str]] = {}
-            offset = None
-            for _ in range(50):  # safety: max 50 pages of 200 = 10k chunks
-                pts, offset = await qd._client.scroll(  # noqa: SLF001
-                    collection_name=qd._collection,  # noqa: SLF001
-                    scroll_filter=flt,
-                    limit=200,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
+    try:
+        await qd.ensure_collection()
+
+        from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+        flt = Filter(
+            must=[FieldCondition(key="user_id", match=MatchValue(value=user.user_id))]
+        )
+        buckets: dict[str, list[str]] = {}
+        offset = None
+        # 50 pages of 200 = 10k chunks ceiling — way more than we'd ever
+        # have in practice for a single user.
+        for _ in range(50):
+            pts, offset = await qd._client.scroll(  # noqa: SLF001
+                collection_name=qd._collection,  # noqa: SLF001
+                scroll_filter=flt,
+                limit=200,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in pts:
+                payload = p.payload or {}
+                src = (
+                    payload.get("source")
+                    or payload.get("filename")
+                    or "untagged"
                 )
-                for p in pts:
-                    payload = p.payload or {}
-                    src = payload.get("source") or payload.get("filename") or "untagged"
-                    text = payload.get("text") or ""
-                    if text:
-                        buckets.setdefault(src, []).append(text)
-                if not offset:
-                    break
+                text = payload.get("text") or ""
+                if text:
+                    buckets.setdefault(src, []).append(text)
+                    chunks_seen += 1
+            if not offset:
+                break
 
-            total_nodes = 0
-            total_edges = 0
-            for src, chunks in buckets.items():
-                joined = "\n\n".join(chunks)[:12000]
+        # Cap per-call work so the request fits inside Railway's HTTP budget.
+        # Each doc costs ~1 LLM call + a handful of Neo4j writes (~5-15s total).
+        MAX_DOCS_PER_CALL = 8
+        items = list(buckets.items())[:MAX_DOCS_PER_CALL]
+
+        for src, chunks in items:
+            joined = "\n\n".join(chunks)[:12000]
+            try:
                 ents = await _extract_entities(joined)
-                if not ents:
-                    continue
+            except Exception as e:
+                skipped.append(f"{src}: extract failed: {e}")
+                continue
+            if not ents:
+                skipped.append(f"{src}: no entities")
+                continue
+            try:
                 n, e = await _write_to_neo4j(user.user_id, ents)
-                total_nodes += n
-                total_edges += e
-                log.info("graph.rebuild.doc", source=src, nodes=n, edges=e)
+            except Exception as exc:
+                skipped.append(f"{src}: neo4j failed: {exc}")
+                continue
+            total_nodes += n
+            total_edges += e
+            docs_seen += 1
+            log.info("graph.rebuild.doc", source=src, nodes=n, edges=e)
 
+        try:
             await audit_write(
                 user_id=user.user_id,
                 actor="context",
                 action="context.graph.rebuild",
-                payload={"docs": len(buckets), "nodes": total_nodes, "edges": total_edges},
+                payload={
+                    "docs_processed": docs_seen,
+                    "docs_total": len(buckets),
+                    "chunks": chunks_seen,
+                    "nodes": total_nodes,
+                    "edges": total_edges,
+                },
             )
-        finally:
-            try:
-                await qd.close()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-    background.add_task(_rebuild)
-    return {"ok": True, "status": "rebuilding"}
+        return {
+            "ok": True,
+            "docs_processed": docs_seen,
+            "docs_total": len(buckets),
+            "chunks_scanned": chunks_seen,
+            "nodes_written": total_nodes,
+            "edges_written": total_edges,
+            "remaining": max(0, len(buckets) - docs_seen),
+            "skipped": skipped,
+        }
+    except Exception as e:
+        log.exception("graph.rebuild.failed")
+        raise HTTPException(500, f"rebuild failed: {e}") from e
+    finally:
+        try:
+            await qd.close()
+        except Exception:
+            pass
 
 
 @router.get("/graph")

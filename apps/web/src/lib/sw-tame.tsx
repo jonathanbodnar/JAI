@@ -2,43 +2,68 @@
 import { useEffect } from "react";
 
 /**
- * Prevent the legacy auto-reloading service worker from yanking React state
- * out from under the user.
+ * Aggressively kill the legacy next-pwa service worker that was caching
+ * stale bundles and preventing hotfixes from reaching the user.
  *
- * Older builds shipped with `skipWaiting: true`, which causes the SW to
- * activate the moment a new build is detected and forces a page reload via
- * `controllerchange`. This wipes any in-progress modal (e.g. onboarding).
+ * We no longer ship a real PWA worker (see `next.config.ts`), so the only
+ * thing this component does is:
+ *   1. Find every registered SW and `.unregister()` it.
+ *   2. Wipe every cache the browser created for our origin.
+ *   3. Hard-reload exactly once after the first cleanup so the user
+ *      immediately sees the fresh bundle.
  *
- * This component:
- *   1. Cancels the auto-reload that next-pwa wires up by capturing the
- *      `controllerchange` event before it can trigger window.location.reload.
- *   2. Tells any waiting SW to skip waiting only on next reload — never
- *      synchronously.
+ * It's safe to leave mounted forever — after the first successful pass it
+ * becomes a no-op (no registrations, no caches).
  */
+const RELOAD_FLAG = "jai.sw.kill.reloaded.v2";
+
 export function ServiceWorkerTamer() {
   useEffect(() => {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
       return;
     }
-    let reloaded = false;
-    const onControllerChange = (e: Event) => {
-      // Block the legacy auto-reload listener that next-pwa installs.
-      // (It listens for controllerchange on the same target.)
-      e.stopImmediatePropagation();
-      reloaded = reloaded || false; // no-op — we intentionally never reload here
+
+    let cancelled = false;
+
+    const kill = async () => {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        if (regs.length === 0 && (await safeCacheKeys()).length === 0) {
+          return; // already clean
+        }
+        await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
+        try {
+          const keys = await safeCacheKeys();
+          await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+        } catch {
+          // ignore
+        }
+        if (cancelled) return;
+        // One-shot hard reload so the freshly-fetched HTML/JS replaces the
+        // SW-served version that's currently rendering this page.
+        if (!sessionStorage.getItem(RELOAD_FLAG)) {
+          sessionStorage.setItem(RELOAD_FLAG, "1");
+          window.location.reload();
+        }
+      } catch {
+        // ignore
+      }
     };
-    navigator.serviceWorker.addEventListener(
-      "controllerchange",
-      onControllerChange,
-      { capture: true },
-    );
+
+    void kill();
     return () => {
-      navigator.serviceWorker.removeEventListener(
-        "controllerchange",
-        onControllerChange,
-        { capture: true } as EventListenerOptions,
-      );
+      cancelled = true;
     };
   }, []);
+
   return null;
+}
+
+async function safeCacheKeys(): Promise<string[]> {
+  try {
+    if (typeof caches === "undefined") return [];
+    return await caches.keys();
+  } catch {
+    return [];
+  }
 }

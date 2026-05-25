@@ -44,7 +44,8 @@ Thumbs.db
 fly.toml.local
 
 # generated
-apps/web/public/sw.js
+# (sw.js is no longer generated — we now ship a hand-written
+# self-destructing stub at apps/web/public/sw.js. Keep workbox out though.)
 apps/web/public/workbox-*.js
 packages/shared-types/src/generated/
 
