@@ -88,7 +88,10 @@ class Settings(BaseSettings):
     jai_frontend_url: str = "https://jai.ftr.me"
     cors_origins: list[str] = Field(default_factory=lambda: [
         "https://jai.ftr.me",
+        "http://localhost:3000",
     ])
+    # Allow any *.up.railway.app preview URL (Railway free deploys)
+    cors_origin_regex: str = r"https://.*\.up\.railway\.app"
 
     # --- Memory tuning ---
     working_window_size: int = 20
