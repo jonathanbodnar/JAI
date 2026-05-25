@@ -1,12 +1,13 @@
-"""Context ingest — drag/drop PDFs, text, or ChatGPT exports.
+"""Context ingest — drag/drop PDFs, DOCX, text, or ChatGPT exports.
 
 Supported inputs:
 - application/pdf            → extract text per page
+- .docx (Word)               → extract paragraphs + table cells
 - text/plain, text/markdown  → use as-is
 - application/json           → ChatGPT export (`conversations.json`) detected
                                by shape; pull out user-authored content
 - application/zip            → ChatGPT export zip; we look for conversations.json
-                               inside
+                               inside (also picks up loose PDFs / DOCX / text)
 
 For each ingested file we:
   1. Chunk the text (~1200 chars, 200 overlap)
@@ -76,6 +77,31 @@ def _extract_pdf(blob: bytes) -> str:
     return "\n\n".join(pages)
 
 
+def _extract_docx(blob: bytes) -> str:
+    """Pull text from a .docx file. Includes paragraphs and table cells."""
+    try:
+        from docx import Document
+    except ImportError:
+        raise HTTPException(500, "python-docx not installed on the server")
+
+    try:
+        doc = Document(io.BytesIO(blob))
+    except Exception as e:
+        log.warning("docx.read_failed", error=str(e))
+        return ""
+
+    parts: list[str] = []
+    for p in doc.paragraphs:
+        if p.text and p.text.strip():
+            parts.append(p.text.strip())
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+    return "\n\n".join(parts)
+
+
 def _extract_chatgpt_conversations(data: Any) -> list[dict[str, Any]]:
     """Parse OpenAI's ChatGPT data-export `conversations.json` format.
 
@@ -138,6 +164,11 @@ def _extract_from_zip(blob: bytes) -> tuple[str, list[dict[str, Any]]]:
                 elif name.endswith(".pdf"):
                     try:
                         plain.append(_extract_pdf(z.read(info.filename)))
+                    except Exception:
+                        pass
+                elif name.endswith(".docx"):
+                    try:
+                        plain.append(_extract_docx(z.read(info.filename)))
                     except Exception:
                         pass
     except zipfile.BadZipFile:
@@ -247,6 +278,11 @@ async def ingest(
         lower = name.lower()
         if ctype == "application/pdf" or lower.endswith(".pdf"):
             plain_text = _extract_pdf(blob)
+        elif (
+            ctype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            or lower.endswith(".docx")
+        ):
+            plain_text = _extract_docx(blob)
         elif ctype == "application/zip" or lower.endswith(".zip"):
             plain_text, gpt_convos = _extract_from_zip(blob)
         elif ctype == "application/json" or lower.endswith(".json"):

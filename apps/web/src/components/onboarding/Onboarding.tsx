@@ -208,7 +208,7 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
               type="file"
               multiple
               hidden
-              accept=".pdf,.txt,.md,.json,.zip,application/pdf,text/plain,text/markdown,application/json,application/zip"
+              accept=".pdf,.docx,.txt,.md,.json,.zip,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,application/json,application/zip"
               onChange={(e) => e.target.files && addFiles(e.target.files)}
             />
             <Upload size={20} className="mx-auto text-[var(--fg-mute)] mb-2" />
@@ -217,7 +217,7 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
               <span className="text-[var(--fg-mute)]">or click to browse</span>
             </div>
             <div className="text-xs text-[var(--fg-mute)] mt-1">
-              PDF, TXT, MD, JSON, ZIP · up to 25MB each
+              PDF, DOCX, TXT, MD, JSON, ZIP · up to 25MB each
             </div>
           </label>
 
