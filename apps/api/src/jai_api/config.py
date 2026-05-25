@@ -97,8 +97,8 @@ class Settings(BaseSettings):
 
     # --- Memory tuning ---
     working_window_size: int = 20
-    mem0_top_k: int = 8
-    qdrant_top_k: int = 5
+    mem0_top_k: int = 12
+    qdrant_top_k: int = 12
     neo4j_hops: int = 1
 
 

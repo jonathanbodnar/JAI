@@ -6,10 +6,34 @@ from typing import Any
 
 import structlog
 from neo4j import AsyncGraphDatabase
+from neo4j.time import Date, DateTime, Duration, Time
 
 from ..config import Settings, get_settings
 
 log = structlog.get_logger()
+
+
+def _coerce(value: Any) -> Any:
+    """Make Neo4j-native types JSON serializable.
+
+    `properties(n)` will return Cypher-side temporal objects (DateTime,
+    Date, etc.) which Pydantic can't dump. Convert them recursively into
+    ISO strings (or primitive types) before they ever reach FastAPI's
+    response serializer.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (DateTime, Date, Time)):
+        return value.iso_format()
+    if isinstance(value, Duration):
+        return str(value)
+    if isinstance(value, list):
+        return [_coerce(v) for v in value]
+    if isinstance(value, tuple):
+        return [_coerce(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _coerce(v) for k, v in value.items()}
+    return str(value)
 
 
 class JaiNeo4j:
@@ -82,9 +106,12 @@ class JaiNeo4j:
         async with self._driver.session(database=self._db) as sess:
             res = await sess.run(cypher, uid=user_id, names=[n.lower() for n in names])
             async for rec in res:
-                node = dict(rec["n"])
+                node = _coerce(dict(rec["n"]))
                 edges = [
-                    {"rel": e["rel"], "node": dict(e["node"]) if e["node"] else None}
+                    {
+                        "rel": e["rel"],
+                        "node": _coerce(dict(e["node"])) if e["node"] else None,
+                    }
                     for e in rec["edges"]
                     if e["node"] is not None
                 ]
@@ -107,10 +134,10 @@ class JaiNeo4j:
         async with self._driver.session(database=self._db) as sess:
             res = await sess.run(cypher_nodes, uid=user_id, limit=limit)
             async for rec in res:
-                nodes.append(dict(rec))
+                nodes.append(_coerce(dict(rec)))
             res = await sess.run(cypher_edges, uid=user_id, limit=limit)
             async for rec in res:
-                edges.append(dict(rec))
+                edges.append(_coerce(dict(rec)))
         return {"nodes": nodes, "edges": edges}
 
     async def close(self) -> None:

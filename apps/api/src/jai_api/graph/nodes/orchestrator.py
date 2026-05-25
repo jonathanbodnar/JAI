@@ -30,20 +30,27 @@ def _format_memory(state: JaiState) -> str:
     parts: list[str] = []
     mem0 = state.get("retrieved_mem0") or []
     if mem0:
-        parts.append("Identity facts (Mem0):")
-        for m in mem0[:8]:
-            parts.append(f"- {m.get('text','').strip()}")
+        parts.append("Identity facts about the user (Mem0):")
+        for m in mem0[:12]:
+            text = (m.get("text", "") or m.get("memory", "") or "").strip()
+            if text:
+                parts.append(f"- {text}")
     qdrant = state.get("retrieved_qdrant") or []
     if qdrant:
-        parts.append("\nRelevant past notes (Qdrant):")
-        for q in qdrant[:5]:
+        parts.append("\nRelevant uploaded context & past notes (Qdrant):")
+        for q in qdrant[:10]:
             text = (q.get("text", "") or "").strip()
-            if text:
-                parts.append(f"- {text[:240]}{'…' if len(text) > 240 else ''}")
+            if not text:
+                continue
+            meta = q.get("metadata") or {}
+            src = meta.get("filename") or meta.get("source") or meta.get("title")
+            tag = f" [from {src}]" if src else ""
+            snippet = text[:600] + ("…" if len(text) > 600 else "")
+            parts.append(f"-{tag} {snippet}")
     graph = state.get("retrieved_graph") or []
     if graph:
         parts.append("\nRelationship graph (Neo4j):")
-        for g in graph[:5]:
+        for g in graph[:8]:
             node = g.get("node", {})
             edges = g.get("edges", [])
             parts.append(f"- {node.get('name', node.get('id','?'))}: " +

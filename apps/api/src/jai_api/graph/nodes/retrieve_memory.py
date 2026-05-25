@@ -28,6 +28,12 @@ def make_retrieve(mem0: JaiMem0, qdrant: JaiQdrant, neo4j: JaiNeo4j):
 
         entities = list({m.group(1) for m in _ENTITY.finditer(query)})[:5]
 
+        # Best-effort ensure indexes exist (idempotent, cheap after first run).
+        try:
+            await qdrant.ensure_collection()
+        except Exception as e:
+            log.warning("retrieve.ensure_collection_failed", error=str(e))
+
         mem0_task = asyncio.create_task(mem0.search(user_id, query))
         qdrant_task = asyncio.create_task(qdrant.search(user_id, query))
         graph_task = asyncio.create_task(neo4j.subgraph_for_entities(user_id, entities))
@@ -36,16 +42,29 @@ def make_retrieve(mem0: JaiMem0, qdrant: JaiQdrant, neo4j: JaiNeo4j):
             mem0_task, qdrant_task, graph_task, return_exceptions=True
         )
 
-        def _coerce(x):
+        def _coerce(name: str, x):
             if isinstance(x, Exception):
-                log.warning("retrieve.failed", error=str(x))
+                log.warning(f"retrieve.{name}.failed", error=str(x), error_type=type(x).__name__)
                 return []
             return x
 
+        mem0_clean = _coerce("mem0", mem0_hits)
+        qdrant_clean = _coerce("qdrant", qdrant_hits)
+        graph_clean = _coerce("graph", graph_hits)
+
+        log.info(
+            "retrieve.hits",
+            user=user_id[:8],
+            mem0=len(mem0_clean) if isinstance(mem0_clean, list) else 0,
+            qdrant=len(qdrant_clean) if isinstance(qdrant_clean, list) else 0,
+            graph=len(graph_clean) if isinstance(graph_clean, list) else 0,
+            entities=entities,
+        )
+
         return {
-            "retrieved_mem0": _coerce(mem0_hits),
-            "retrieved_qdrant": _coerce(qdrant_hits),
-            "retrieved_graph": _coerce(graph_hits),
+            "retrieved_mem0": mem0_clean,
+            "retrieved_qdrant": qdrant_clean,
+            "retrieved_graph": graph_clean,
         }
 
     return retrieve
