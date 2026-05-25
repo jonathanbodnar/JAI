@@ -9,7 +9,10 @@ type Note = { id: string; title?: string | null; body?: string | null; updated_a
  * iterations will use Qdrant hits and Mem0 topics to group by theme.
  */
 export function ContextDocs() {
-  const { data: notes } = useSWR<Note[]>("/notes?include_archived=true", (k: string) => api(k));
+  const { data: notes } = useSWR<Note[]>(
+    "/notes?include_archived=true",
+    (k: string) => api<Note[]>(k),
+  );
   const groups = groupByMonth(notes || []);
   if (!notes || notes.length === 0) {
     return (

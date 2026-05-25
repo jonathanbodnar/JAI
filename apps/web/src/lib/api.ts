@@ -13,7 +13,10 @@ async function authHeader(): Promise<Record<string, string>> {
   }
 }
 
-export async function api<T = unknown>(
+// Permissive return type lets useSWR<T>(key, api) infer cleanly without
+// requiring an explicit generic at every call site.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function api<T = any>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
