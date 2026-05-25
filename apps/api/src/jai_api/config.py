@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # --- Google OAuth ---
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
-    google_oauth_redirect_uri: str = "https://api.jai.ftr.me/auth/google/callback"
+    google_oauth_redirect_uri: str = "https://api.ftr.me/auth/google/callback"
 
     # --- Observability ---
     langsmith_api_key: str = ""
@@ -84,14 +84,16 @@ class Settings(BaseSettings):
 
     # --- App ---
     jai_user_id: str = ""           # single-tenant dev override
-    jai_backend_url: str = "https://api.jai.ftr.me"
-    jai_frontend_url: str = "https://jai.ftr.me"
+    jai_backend_url: str = "https://api.ftr.me"
+    jai_frontend_url: str = "https://app.ftr.me"
     cors_origins: list[str] = Field(default_factory=lambda: [
+        "https://app.ftr.me",
         "https://jai.ftr.me",
         "http://localhost:3000",
     ])
-    # Allow any *.up.railway.app preview URL (Railway free deploys)
-    cors_origin_regex: str = r"https://.*\.up\.railway\.app"
+    # Allow any *.up.railway.app preview URL (Railway free deploys) and any
+    # *.ftr.me host (covers app./api./tts. and future subdomains).
+    cors_origin_regex: str = r"https://([a-z0-9-]+\.)*(up\.railway\.app|ftr\.me)$"
 
     # --- Memory tuning ---
     working_window_size: int = 20

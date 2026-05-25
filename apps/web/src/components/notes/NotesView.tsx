@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { api } from "@/lib/api";
 import { Pin, Plus, Search } from "lucide-react";
@@ -87,24 +87,59 @@ function Masonry({ children }: { children: React.ReactNode }) {
   return <div className="keep-masonry py-1">{children}</div>;
 }
 
+/**
+ * Google Keep–style composer: click to expand, then anything you type
+ * auto-saves when you click outside the card. No explicit Save button.
+ */
 function Composer({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+  const submittingRef = useRef(false);
+
   const submit = async () => {
-    if (!title.trim() && !body.trim()) {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    try {
+      const t = title.trim();
+      const b = body.trim();
+      if (!t && !b) {
+        setOpen(false);
+        return;
+      }
+      await api("/notes", {
+        method: "POST",
+        body: JSON.stringify({ title: t || null, body: b || null }),
+      });
+      setTitle("");
+      setBody("");
       setOpen(false);
-      return;
+      onCreated();
+    } finally {
+      submittingRef.current = false;
     }
-    await api("/notes", {
-      method: "POST",
-      body: JSON.stringify({ title: title || null, body: body || null }),
-    });
-    setTitle("");
-    setBody("");
-    setOpen(false);
-    onCreated();
   };
+
+  // Auto-close + auto-save when the user clicks anywhere outside.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      if (!containerRef.current) return;
+      if (containerRef.current.contains(e.target as Node)) return;
+      void submit();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("touchstart", onDown);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("touchstart", onDown);
+    };
+    // submit closes over title/body via refs implicitly; we want fresh values
+    // each call so re-bind on changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, title, body]);
+
   if (!open) {
     return (
       <button
@@ -117,7 +152,10 @@ function Composer({ onCreated }: { onCreated: () => void }) {
     );
   }
   return (
-    <div className="mx-3 mt-3 rounded-xl border border-[var(--line)] bg-[var(--bg-elev)] p-3">
+    <div
+      ref={containerRef}
+      className="mx-3 mt-3 rounded-xl border border-[var(--line)] bg-[var(--bg-elev)] p-3"
+    >
       <input
         autoFocus
         value={title}
@@ -129,18 +167,18 @@ function Composer({ onCreated }: { onCreated: () => void }) {
         value={body}
         onChange={(e) => setBody(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
         }}
         rows={2}
         placeholder="Take a note…"
         className="w-full bg-transparent outline-none text-[14px] resize-none"
       />
-      <div className="flex justify-end gap-2 mt-2">
-        <button onClick={() => setOpen(false)} className="text-sm text-[var(--fg-mute)] px-3 py-1.5">
-          Cancel
-        </button>
-        <button onClick={submit} className="text-sm text-[var(--accent)] px-3 py-1.5">
-          Save
+      <div className="flex justify-end mt-2">
+        <button
+          onClick={() => void submit()}
+          className="text-xs text-[var(--fg-mute)] hover:text-white px-2 py-1"
+        >
+          Close
         </button>
       </div>
     </div>
