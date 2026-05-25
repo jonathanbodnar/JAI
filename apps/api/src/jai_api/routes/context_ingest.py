@@ -244,6 +244,33 @@ class IngestSummary(BaseModel):
     facts_added: int
     conversations_added: int
     skipped: list[str] = []
+    document_ids: list[str] = []
+
+
+class DocumentRow(BaseModel):
+    id: str
+    filename: str
+    size_bytes: int | None = None
+    content_type: str | None = None
+    kind: str
+    chunks_count: int
+    conversations_count: int
+    facts_count: int
+    metadata: dict[str, Any] | None = None
+    created_at: str
+
+
+class SearchHit(BaseModel):
+    text: str
+    score: float
+    source: str | None = None
+    filename: str | None = None
+    title: str | None = None
+
+
+class SearchIn(BaseModel):
+    q: str
+    limit: int | None = None
 
 
 @router.post("/ingest", response_model=IngestSummary)
@@ -257,11 +284,13 @@ async def ingest(
     qd = JaiQdrant()
     await qd.ensure_collection()
     mem = JaiMem0()
+    sb = supabase_admin()
 
     chunks_added = 0
     facts_added = 0
     convos_added = 0
     skipped: list[str] = []
+    document_ids: list[str] = []
 
     for f in files:
         name = f.filename or "unnamed"
@@ -274,7 +303,6 @@ async def ingest(
         plain_text = ""
         gpt_convos: list[dict[str, Any]] = []
 
-        # Route based on type / extension
         lower = name.lower()
         if ctype == "application/pdf" or lower.endswith(".pdf"):
             plain_text = _extract_pdf(blob)
@@ -290,7 +318,6 @@ async def ingest(
                 data = json.loads(blob.decode("utf-8"))
                 gpt_convos = _extract_chatgpt_conversations(data)
                 if not gpt_convos:
-                    # plain JSON, dump as text
                     plain_text = blob.decode("utf-8", errors="ignore")
             except Exception:
                 skipped.append(f"{name} (invalid JSON)")
@@ -300,6 +327,12 @@ async def ingest(
         else:
             skipped.append(f"{name} (unsupported type {ctype or '?'})")
             continue
+
+        # Per-file counters so we can persist a row that reflects this single file.
+        file_chunks = 0
+        file_convos = 0
+        file_facts = 0
+        kind = "chatgpt_export" if gpt_convos else "document"
 
         # --- index ChatGPT conversations ---------------------------------
         for c in gpt_convos:
@@ -317,17 +350,19 @@ async def ingest(
                             "title": c["title"],
                             "created": c.get("created"),
                             "kind": "chat_history",
+                            "filename": name,
                         },
                     )
                     chunks_added += 1
+                    file_chunks += 1
                 except Exception as e:
                     log.warning("ingest.qdrant_add_failed", error=str(e))
             convos_added += 1
+            file_convos += 1
 
-        # --- index plain text (PDFs, .txt, .md) --------------------------
+        # --- index plain text (PDFs, .txt, .md, .docx) -------------------
         if plain_text.strip():
-            chunks = _chunk(plain_text)
-            for chunk in chunks:
+            for chunk in _chunk(plain_text):
                 if chunks_added >= MAX_TOTAL_CHUNKS:
                     break
                 try:
@@ -338,10 +373,10 @@ async def ingest(
                         metadata={"kind": "document", "filename": name},
                     )
                     chunks_added += 1
+                    file_chunks += 1
                 except Exception as e:
                     log.warning("ingest.qdrant_add_failed", error=str(e))
 
-            # Fact extraction — runs once per file, not per chunk
             facts = await _extract_facts(plain_text)
             if facts:
                 try:
@@ -352,13 +387,38 @@ async def ingest(
                         metadata={"source": f"upload:{name}"},
                     )
                     facts_added += len(facts)
+                    file_facts = len(facts)
                 except Exception as e:
                     log.warning("ingest.mem0_add_failed", error=str(e))
+
+        # Persist a row so the user can SEE what was ingested.
+        if file_chunks or file_convos:
+            try:
+                res = (
+                    sb.table("documents")
+                    .insert(
+                        {
+                            "user_id": user.user_id,
+                            "filename": name,
+                            "size_bytes": len(blob),
+                            "content_type": ctype or None,
+                            "kind": kind,
+                            "chunks_count": file_chunks,
+                            "conversations_count": file_convos,
+                            "facts_count": file_facts,
+                            "metadata": {"truncated": chunks_added >= MAX_TOTAL_CHUNKS},
+                        }
+                    )
+                    .execute()
+                )
+                if res.data:
+                    document_ids.append(res.data[0]["id"])
+            except Exception as e:
+                log.warning("ingest.document_row_failed", error=str(e))
 
     # Mark onboarded as soon as anything was ingested
     if chunks_added > 0 or convos_added > 0:
         try:
-            sb = supabase_admin()
             sb.table("users").update({"metadata": {"onboarded": True}}).eq(
                 "id", user.user_id
             ).execute()
@@ -375,6 +435,7 @@ async def ingest(
             "facts": facts_added,
             "conversations": convos_added,
             "skipped": skipped,
+            "document_ids": document_ids,
         },
     )
 
@@ -384,4 +445,59 @@ async def ingest(
         facts_added=facts_added,
         conversations_added=convos_added,
         skipped=skipped,
+        document_ids=document_ids,
     )
+
+
+@router.get("/documents", response_model=list[DocumentRow])
+async def list_documents(user: CurrentUserDep, limit: int = 200) -> list[dict[str, Any]]:
+    sb = supabase_admin()
+    res = (
+        sb.table("documents")
+        .select("*")
+        .eq("user_id", user.user_id)
+        .order("created_at", desc=True)
+        .limit(min(max(limit, 1), 500))
+        .execute()
+    )
+    return res.data or []
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document(user: CurrentUserDep, doc_id: str) -> dict[str, Any]:
+    """Soft delete — only removes the row, not the underlying vectors. Those
+    are pruned by the nightly Qdrant salience job. Good enough for v1."""
+    sb = supabase_admin()
+    sb.table("documents").delete().eq("user_id", user.user_id).eq("id", doc_id).execute()
+    return {"ok": True}
+
+
+@router.post("/search", response_model=list[SearchHit])
+async def search(user: CurrentUserDep, body: SearchIn) -> list[dict[str, Any]]:
+    """Semantic recall over the user's Qdrant memory. Useful as a sanity
+    check after ingest ('did my docs actually go in?') and as a debug tool."""
+    q = (body.q or "").strip()
+    if not q:
+        raise HTTPException(400, "missing query")
+    qd = JaiQdrant()
+    try:
+        await qd.ensure_collection()
+        hits = await qd.search(user.user_id, q)
+    except Exception as e:
+        log.warning("context.search_failed", error=str(e))
+        raise HTTPException(500, f"search failed: {e}") from e
+
+    limit = min(max(body.limit or 20, 1), 50)
+    out: list[dict[str, Any]] = []
+    for h in hits[:limit]:
+        meta = h.get("metadata") or {}
+        out.append(
+            {
+                "text": h.get("text", ""),
+                "score": float(h.get("score", 0.0)),
+                "source": meta.get("source"),
+                "filename": meta.get("filename"),
+                "title": meta.get("title"),
+            }
+        )
+    return out
