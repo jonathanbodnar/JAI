@@ -1,0 +1,17 @@
+name: nightly-consolidate
+
+on:
+  schedule:
+    # 07:00 UTC ≈ 03:00 EDT / midnight PDT. Adjust per your timezone.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /jobs/consolidate
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.JAI_MCP_SERVER_TOKEN }}" \
+            "${{ secrets.JAI_BACKEND_URL }}/jobs/consolidate"

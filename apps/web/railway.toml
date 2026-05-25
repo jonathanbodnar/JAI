@@ -1,0 +1,13 @@
+# Railway config for the Next.js PWA.
+# Connect GitHub repo with Root Directory = apps/web.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "pnpm start"
+healthcheckPath = "/"
+restartPolicyType = "ON_FAILURE"
+
+[[services]]
+name = "jai-pwa"

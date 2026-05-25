@@ -1,0 +1,22 @@
+# Kokoro TTS sidecar — uses prebuilt image, no custom code.
+# Deploy: fly launch --image ghcr.io/remsky/kokoro-fastapi-cpu:latest --no-deploy
+#         fly deploy
+app = "jai-tts"
+primary_region = "ord"
+
+[build]
+image = "ghcr.io/remsky/kokoro-fastapi-cpu:latest"
+
+[env]
+USE_GPU = "false"
+
+[http_service]
+internal_port = 8880
+force_https = true
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+
+[[vm]]
+size = "performance-2x"
+memory = "4gb"

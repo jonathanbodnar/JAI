@@ -1,0 +1,25 @@
+app = "jai-api"
+primary_region = "ord"
+
+[build]
+
+[env]
+PORT = "8000"
+
+[http_service]
+internal_port = 8000
+force_https = true
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+
+[[vm]]
+size = "shared-cpu-2x"
+memory = "2gb"
+
+[deploy]
+strategy = "rolling"
+
+# Nightly consolidation is triggered externally (GitHub Action cron → POST
+# /jobs/consolidate). The API itself is stateless — all data lives in Supabase,
+# Qdrant Cloud, Neo4j Aura, and Mem0 Cloud.

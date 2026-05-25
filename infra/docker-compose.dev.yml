@@ -1,0 +1,33 @@
+# Local-dev fallbacks for Qdrant + Neo4j + Kokoro TTS.
+# In production, use Qdrant Cloud + Neo4j Aura + Fly.io TTS.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  neo4j:
+    image: neo4j:5.24-community
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/jai-dev-password
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    ports:
+      - "8880:8880"
+    environment:
+      USE_GPU: "false"
+
+volumes:
+  qdrant_data:
+  neo4j_data:

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd ../.. && pnpm install --no-frozen-lockfile && pnpm --filter @jai/web build",
+  "outputDirectory": ".next",
+  "installCommand": "echo skip (handled in buildCommand)",
+  "framework": "nextjs",
+  "regions": ["iad1"],
+  "headers": [
+    { "source": "/manifest.json", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/sw.js",         "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] }
+  ]
+}

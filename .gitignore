@@ -1,0 +1,54 @@
+# deps
+node_modules/
+.pnpm-store/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# build
+.next/
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+.envrc
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# python uv
+.python-version
+
+# fly
+fly.toml.local
+
+# generated
+apps/web/public/sw.js
+apps/web/public/workbox-*.js
+packages/shared-types/src/generated/
+
+# data
+data/
+*.sqlite
+*.db

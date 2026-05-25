@@ -1,0 +1,23 @@
+{
+  "name": "JAI — your second brain",
+  "short_name": "JAI",
+  "description": "A second brain, founder OS, and autonomous operator. One living conversation.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b0b0c",
+  "theme_color": "#0b0b0c",
+  "icons": [
+    { "src": "/icon.svg",     "type": "image/svg+xml", "sizes": "any",       "purpose": "any maskable" },
+    { "src": "/icon-192.png", "type": "image/png",     "sizes": "192x192",   "purpose": "any maskable" },
+    { "src": "/icon-512.png", "type": "image/png",     "sizes": "512x512",   "purpose": "any maskable" }
+  ],
+  "categories": ["productivity", "lifestyle", "utilities"],
+  "shortcuts": [
+    { "name": "Talk", "url": "/", "description": "Open chat & talk to JAI" },
+    { "name": "Tasks", "url": "/tasks" },
+    { "name": "Notes", "url": "/notes" },
+    { "name": "Context", "url": "/context" }
+  ]
+}
