@@ -72,11 +72,8 @@ function clearDraft() {
   }
 }
 
-type IngestSummary = {
-  files: number;
-  chunks_added: number;
-  facts_added: number;
-  conversations_added: number;
+type IngestResponse = {
+  accepted: { document_id: string; filename: string; status: string }[];
   skipped: string[];
 };
 
@@ -88,7 +85,7 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
   const [bio, setBio] = useState<string>(() => loadDraft().bio);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
-  const [summary, setSummary] = useState<IngestSummary | null>(null);
+  const [summary, setSummary] = useState<IngestResponse | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { mutate } = useSWRConfig();
@@ -120,17 +117,26 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
     try {
       // 1. Upload files if any
       if (files.length) {
-        setProgress(`Ingesting ${files.length} file${files.length > 1 ? "s" : ""}…`);
+        setProgress(`Uploading ${files.length} file${files.length > 1 ? "s" : ""}…`);
         const fd = new FormData();
         files.forEach((f) => fd.append("files", f));
         const headers = await authHeader();
-        const res = await fetch(`${BASE}/context/ingest`, {
-          method: "POST",
-          body: fd,
-          headers, // FormData sets its own Content-Type
-        });
-        if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-        const s = (await res.json()) as IngestSummary;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5 * 60_000);
+        let res: Response;
+        try {
+          res = await fetch(`${BASE}/context/ingest`, {
+            method: "POST",
+            body: fd,
+            headers,
+            signal: ctrl.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!res.ok)
+          throw new Error(`Upload failed: ${res.status} ${await res.text().catch(() => "")}`);
+        const s = (await res.json()) as IngestResponse;
         setSummary(s);
       }
 
@@ -264,19 +270,11 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
 
           {summary && (
             <div className="rounded-lg bg-[var(--bg-elev2)] border border-[var(--line)] px-3 py-2 text-xs text-[var(--fg-mute)] space-y-0.5">
-              <div>
-                <span className="text-[var(--ok)]">✓</span> {summary.files} file
-                {summary.files === 1 ? "" : "s"} ingested
-              </div>
-              <div>{summary.chunks_added} chunks embedded into semantic memory</div>
-              {summary.conversations_added > 0 && (
+              {summary.accepted.length > 0 && (
                 <div>
-                  {summary.conversations_added} ChatGPT conversation
-                  {summary.conversations_added === 1 ? "" : "s"} indexed
+                  <span className="text-[var(--ok)]">✓</span> {summary.accepted.length} file
+                  {summary.accepted.length === 1 ? "" : "s"} queued — embedding in background
                 </div>
-              )}
-              {summary.facts_added > 0 && (
-                <div>{summary.facts_added} identity facts saved to long-term memory</div>
               )}
               {summary.skipped.length > 0 && (
                 <div className="text-[var(--warn)]">

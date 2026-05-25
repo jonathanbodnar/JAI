@@ -75,6 +75,52 @@ class JaiQdrant:
         )
         return point_id
 
+    async def add_batch(
+        self,
+        *,
+        user_id: str,
+        items: list[dict[str, Any]],
+        batch_size: int = 64,
+    ) -> int:
+        """Batch ingest. Each item is {text, source, metadata?}.
+
+        One embeddings call per `batch_size` items, one Qdrant upsert per
+        batch. ~10–50x faster than calling `.add()` in a loop because the
+        per-request RTT dominates for short chunks.
+        """
+        if not items:
+            return 0
+        now = datetime.now(timezone.utc)
+        ts = int(now.timestamp())
+        iso = now.isoformat()
+        added = 0
+        for start in range(0, len(items), batch_size):
+            window = items[start : start + batch_size]
+            texts = [w["text"] for w in window]
+            embeddings = await self._embed.aembed_documents(texts)
+            points: list[PointStruct] = []
+            for w, emb in zip(window, embeddings, strict=True):
+                meta = w.get("metadata") or {}
+                points.append(
+                    PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=emb,
+                        payload={
+                            "user_id": user_id,
+                            "text": w["text"],
+                            "source": w["source"],
+                            "created_at": iso,
+                            "created_at_ts": ts,
+                            "hits": 0,
+                            "last_hit_at": None,
+                            **meta,
+                        },
+                    )
+                )
+            await self._client.upsert(collection_name=self._collection, points=points)
+            added += len(points)
+        return added
+
     async def search(self, user_id: str, query: str) -> list[dict]:
         emb = await self._embed.aembed_query(query)
         results = await self._client.search(

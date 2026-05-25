@@ -11,9 +11,11 @@ type Doc = {
   size_bytes: number | null;
   content_type: string | null;
   kind: "document" | "chatgpt_export";
+  status: "processing" | "complete" | "failed";
   chunks_count: number;
   conversations_count: number;
   facts_count: number;
+  error?: string | null;
   created_at: string;
 };
 
@@ -106,10 +108,16 @@ function DocRow({ d, onDelete }: { d: Doc; onDelete: () => void }) {
     }
   };
   return (
-    <li className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[var(--bg-elev)] border border-[var(--line)]">
+    <li
+      className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[var(--bg-elev)] border border-[var(--line)]"
+      title={d.error || undefined}
+    >
       <Icon size={14} className="text-[var(--fg-mute)] shrink-0" />
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium truncate">{d.filename}</div>
+        <div className="text-sm font-medium truncate flex items-center gap-2">
+          {d.filename}
+          <StatusBadge status={d.status} />
+        </div>
         <div className="text-xs text-[var(--fg-mute)] mt-0.5 flex gap-2 flex-wrap">
           <span>{fmtSize(d.size_bytes)}</span>
           <span>·</span>
@@ -128,6 +136,9 @@ function DocRow({ d, onDelete }: { d: Doc; onDelete: () => void }) {
           )}
           <span>·</span>
           <span>{fmtDate(d.created_at)}</span>
+          {d.status === "failed" && d.error && (
+            <span className="text-[var(--err)]">· {d.error.slice(0, 60)}</span>
+          )}
         </div>
       </div>
       <button
@@ -139,6 +150,19 @@ function DocRow({ d, onDelete }: { d: Doc; onDelete: () => void }) {
         <Trash2 size={14} />
       </button>
     </li>
+  );
+}
+
+function StatusBadge({ status }: { status: Doc["status"] }) {
+  if (status === "complete") return null;
+  const styles =
+    status === "processing"
+      ? "bg-[var(--accent)]/15 text-[var(--accent)] animate-pulse"
+      : "bg-[var(--err)]/15 text-[var(--err)]";
+  return (
+    <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${styles}`}>
+      {status}
+    </span>
   );
 }
 

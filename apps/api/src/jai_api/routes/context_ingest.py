@@ -1,34 +1,28 @@
 """Context ingest — drag/drop PDFs, DOCX, text, or ChatGPT exports.
 
-Supported inputs:
-- application/pdf            → extract text per page
-- .docx (Word)               → extract paragraphs + table cells
-- text/plain, text/markdown  → use as-is
-- application/json           → ChatGPT export (`conversations.json`) detected
-                               by shape; pull out user-authored content
-- application/zip            → ChatGPT export zip; we look for conversations.json
-                               inside (also picks up loose PDFs / DOCX / text)
+Flow (now async to dodge Railway/Cloudflare's ~100s HTTP timeout):
 
-For each ingested file we:
-  1. Chunk the text (~1200 chars, 200 overlap)
-  2. Embed each chunk → Qdrant
-  3. Pull 5-15 durable identity facts (best-effort, LLM-extracted) → Mem0
-  4. Mark the user as onboarded so the wizard doesn't reappear
-
-The endpoint streams nothing fancy — it returns once everything is ingested.
-For very large drops (ChatGPT exports with thousands of conversations) we cap
-the work per request and tell the caller how many items were processed.
+  1. HTTP handler parses every uploaded file synchronously (cheap — just
+     PDF/DOCX text extraction, no network).
+  2. For each file we insert a `documents` row in `processing` state and
+     return immediately. The frontend already subscribes to that table via
+     Supabase Realtime, so rows appear as 'processing' instantly and flip
+     to 'complete' (or 'failed') when the background task finishes.
+  3. The background task batches embeddings (~64 chunks per OpenRouter call),
+     upserts them to Qdrant in one go per batch, and finally extracts identity
+     facts to Mem0.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from ..auth import CurrentUserDep
@@ -44,28 +38,26 @@ router = APIRouter()
 # --- limits --------------------------------------------------------------
 
 MAX_FILE_MB = 25
-MAX_TOTAL_CHUNKS = 2000          # per request, prevents runaway costs
+MAX_TOTAL_CHUNKS = 5000          # per-request safety cap (was 2000 — now async)
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 200
-MAX_GPT_CONVOS = 500             # safety cap on a single ChatGPT export
+MAX_GPT_CONVOS = 1000
+EMBED_BATCH = 64                 # chunks per embedding API call
 
 
 # --- text extraction -----------------------------------------------------
 
 
 def _extract_pdf(blob: bytes) -> str:
-    """Pull text from a PDF, page by page. Falls back to empty if unparseable."""
     try:
         from pypdf import PdfReader
     except ImportError:
         raise HTTPException(500, "pypdf not installed on the server")
-
     try:
         reader = PdfReader(io.BytesIO(blob))
     except Exception as e:
         log.warning("pdf.read_failed", error=str(e))
         return ""
-
     pages: list[str] = []
     for i, page in enumerate(reader.pages):
         try:
@@ -78,18 +70,15 @@ def _extract_pdf(blob: bytes) -> str:
 
 
 def _extract_docx(blob: bytes) -> str:
-    """Pull text from a .docx file. Includes paragraphs and table cells."""
     try:
         from docx import Document
     except ImportError:
         raise HTTPException(500, "python-docx not installed on the server")
-
     try:
         doc = Document(io.BytesIO(blob))
     except Exception as e:
         log.warning("docx.read_failed", error=str(e))
         return ""
-
     parts: list[str] = []
     for p in doc.paragraphs:
         if p.text and p.text.strip():
@@ -103,17 +92,8 @@ def _extract_docx(blob: bytes) -> str:
 
 
 def _extract_chatgpt_conversations(data: Any) -> list[dict[str, Any]]:
-    """Parse OpenAI's ChatGPT data-export `conversations.json` format.
-
-    The export is a JSON array; each conversation has a `mapping` dict whose
-    nodes contain `message.author.role` ("user" / "assistant" / "system") and
-    `message.content.parts`. We keep user-authored messages because those
-    encode the human's preferences, beliefs, and history — assistant replies
-    are noise for identity modeling.
-    """
     if not isinstance(data, list):
         return []
-
     out: list[dict[str, Any]] = []
     for convo in data[:MAX_GPT_CONVOS]:
         if not isinstance(convo, dict):
@@ -135,13 +115,11 @@ def _extract_chatgpt_conversations(data: Any) -> list[dict[str, Any]]:
                     user_msgs.append(p.strip())
         if not user_msgs:
             continue
-        body = "\n\n".join(user_msgs)
-        out.append({"title": title, "created": created, "body": body})
+        out.append({"title": title, "created": created, "body": "\n\n".join(user_msgs)})
     return out
 
 
 def _extract_from_zip(blob: bytes) -> tuple[str, list[dict[str, Any]]]:
-    """Returns (plain_text_combined, chatgpt_conversations)."""
     plain: list[str] = []
     convos: list[dict[str, Any]] = []
     try:
@@ -200,11 +178,6 @@ def _chunk(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> 
 
 
 async def _extract_facts(text: str, max_facts: int = 12) -> list[str]:
-    """Pull durable identity facts out of a blob (best-effort).
-
-    Uses the orchestrator model with a tight prompt. Failures are non-fatal —
-    we just return [] so the chunk-embedding path still runs.
-    """
     if not text.strip():
         return []
     try:
@@ -235,16 +208,20 @@ async def _extract_facts(text: str, max_facts: int = 12) -> list[str]:
         return []
 
 
-# --- main route ----------------------------------------------------------
+# --- API models ----------------------------------------------------------
 
 
-class IngestSummary(BaseModel):
-    files: int
-    chunks_added: int
-    facts_added: int
-    conversations_added: int
+class IngestStub(BaseModel):
+    """What we return synchronously — one entry per accepted file."""
+    document_id: str
+    filename: str
+    status: str           # 'processing' | 'failed'
+    error: str | None = None
+
+
+class IngestResponse(BaseModel):
+    accepted: list[IngestStub]
     skipped: list[str] = []
-    document_ids: list[str] = []
 
 
 class DocumentRow(BaseModel):
@@ -253,10 +230,12 @@ class DocumentRow(BaseModel):
     size_bytes: int | None = None
     content_type: str | None = None
     kind: str
+    status: str = "complete"
     chunks_count: int
     conversations_count: int
     facts_count: int
     metadata: dict[str, Any] | None = None
+    error: str | None = None
     created_at: str
 
 
@@ -273,24 +252,141 @@ class SearchIn(BaseModel):
     limit: int | None = None
 
 
-@router.post("/ingest", response_model=IngestSummary)
+# --- background worker ---------------------------------------------------
+
+
+async def _process_one(
+    *,
+    user_id: str,
+    doc_id: str,
+    filename: str,
+    plain_text: str,
+    gpt_convos: list[dict[str, Any]],
+) -> None:
+    """Embed → Qdrant → Mem0. Updates the documents row with final counts."""
+    sb = supabase_admin()
+    qd = JaiQdrant()
+    mem = JaiMem0()
+
+    chunks_count = 0
+    conv_count = 0
+    facts_count = 0
+
+    try:
+        await qd.ensure_collection()
+
+        # --- ChatGPT conversations -----------------------------------
+        if gpt_convos:
+            items: list[dict[str, Any]] = []
+            for c in gpt_convos:
+                for chunk in _chunk(c["body"]):
+                    items.append(
+                        {
+                            "text": chunk,
+                            "source": "chatgpt_export",
+                            "metadata": {
+                                "title": c["title"],
+                                "created": c.get("created"),
+                                "kind": "chat_history",
+                                "filename": filename,
+                            },
+                        }
+                    )
+                    if len(items) >= MAX_TOTAL_CHUNKS:
+                        break
+                conv_count += 1
+                if len(items) >= MAX_TOTAL_CHUNKS:
+                    break
+            if items:
+                chunks_count += await qd.add_batch(
+                    user_id=user_id, items=items, batch_size=EMBED_BATCH
+                )
+
+        # --- plain text ----------------------------------------------
+        if plain_text.strip():
+            items = [
+                {
+                    "text": ch,
+                    "source": f"upload:{filename}",
+                    "metadata": {"kind": "document", "filename": filename},
+                }
+                for ch in _chunk(plain_text)
+            ][: max(0, MAX_TOTAL_CHUNKS - chunks_count)]
+            if items:
+                chunks_count += await qd.add_batch(
+                    user_id=user_id, items=items, batch_size=EMBED_BATCH
+                )
+
+            # Fact extraction once per file
+            facts = await _extract_facts(plain_text)
+            if facts:
+                try:
+                    msgs = [{"role": "user", "content": f"Fact about me: {x}"} for x in facts]
+                    await mem.add(user_id, msgs, metadata={"source": f"upload:{filename}"})
+                    facts_count = len(facts)
+                except Exception as e:
+                    log.warning("ingest.mem0_add_failed", error=str(e))
+
+        sb.table("documents").update(
+            {
+                "status": "complete",
+                "chunks_count": chunks_count,
+                "conversations_count": conv_count,
+                "facts_count": facts_count,
+            }
+        ).eq("id", doc_id).eq("user_id", user_id).execute()
+
+        # Mark onboarded after first successful ingest
+        try:
+            sb.table("users").update({"metadata": {"onboarded": True}}).eq(
+                "id", user_id
+            ).execute()
+        except Exception:
+            pass
+
+        await audit_write(
+            user_id=user_id,
+            actor="context",
+            action="context.ingest.complete",
+            payload={
+                "document_id": doc_id,
+                "filename": filename,
+                "chunks": chunks_count,
+                "conversations": conv_count,
+                "facts": facts_count,
+            },
+        )
+    except Exception as e:
+        log.exception("ingest.background_failed", document_id=doc_id, filename=filename)
+        try:
+            sb.table("documents").update(
+                {
+                    "status": "failed",
+                    "error": str(e)[:500],
+                    "chunks_count": chunks_count,
+                    "conversations_count": conv_count,
+                    "facts_count": facts_count,
+                }
+            ).eq("id", doc_id).eq("user_id", user_id).execute()
+        except Exception:
+            pass
+
+
+# --- routes --------------------------------------------------------------
+
+
+@router.post("/ingest", response_model=IngestResponse)
 async def ingest(
     user: CurrentUserDep,
+    background: BackgroundTasks,
     files: list[UploadFile] = File(...),
-) -> IngestSummary:
+) -> IngestResponse:
     if not files:
         raise HTTPException(400, "no files uploaded")
 
-    qd = JaiQdrant()
-    await qd.ensure_collection()
-    mem = JaiMem0()
     sb = supabase_admin()
-
-    chunks_added = 0
-    facts_added = 0
-    convos_added = 0
+    accepted: list[IngestStub] = []
     skipped: list[str] = []
-    document_ids: list[str] = []
 
     for f in files:
         name = f.filename or "unnamed"
@@ -304,149 +400,76 @@ async def ingest(
         gpt_convos: list[dict[str, Any]] = []
 
         lower = name.lower()
-        if ctype == "application/pdf" or lower.endswith(".pdf"):
-            plain_text = _extract_pdf(blob)
-        elif (
-            ctype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            or lower.endswith(".docx")
-        ):
-            plain_text = _extract_docx(blob)
-        elif ctype == "application/zip" or lower.endswith(".zip"):
-            plain_text, gpt_convos = _extract_from_zip(blob)
-        elif ctype == "application/json" or lower.endswith(".json"):
-            try:
+        try:
+            if ctype == "application/pdf" or lower.endswith(".pdf"):
+                plain_text = _extract_pdf(blob)
+            elif (
+                ctype
+                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                or lower.endswith(".docx")
+            ):
+                plain_text = _extract_docx(blob)
+            elif ctype == "application/zip" or lower.endswith(".zip"):
+                plain_text, gpt_convos = _extract_from_zip(blob)
+            elif ctype == "application/json" or lower.endswith(".json"):
                 data = json.loads(blob.decode("utf-8"))
                 gpt_convos = _extract_chatgpt_conversations(data)
                 if not gpt_convos:
                     plain_text = blob.decode("utf-8", errors="ignore")
-            except Exception:
-                skipped.append(f"{name} (invalid JSON)")
+            elif ctype.startswith("text/") or lower.endswith((".txt", ".md")):
+                plain_text = blob.decode("utf-8", errors="ignore")
+            else:
+                skipped.append(f"{name} (unsupported type {ctype or '?'})")
                 continue
-        elif ctype.startswith("text/") or lower.endswith((".txt", ".md")):
-            plain_text = blob.decode("utf-8", errors="ignore")
-        else:
-            skipped.append(f"{name} (unsupported type {ctype or '?'})")
+        except Exception as e:
+            skipped.append(f"{name} ({type(e).__name__}: {e})")
             continue
 
-        # Per-file counters so we can persist a row that reflects this single file.
-        file_chunks = 0
-        file_convos = 0
-        file_facts = 0
+        if not plain_text.strip() and not gpt_convos:
+            skipped.append(f"{name} (no extractable text)")
+            continue
+
         kind = "chatgpt_export" if gpt_convos else "document"
 
-        # --- index ChatGPT conversations ---------------------------------
-        for c in gpt_convos:
-            if chunks_added >= MAX_TOTAL_CHUNKS:
-                break
-            for chunk in _chunk(c["body"]):
-                if chunks_added >= MAX_TOTAL_CHUNKS:
-                    break
-                try:
-                    await qd.add(
-                        user_id=user.user_id,
-                        text=chunk,
-                        source="chatgpt_export",
-                        metadata={
-                            "title": c["title"],
-                            "created": c.get("created"),
-                            "kind": "chat_history",
-                            "filename": name,
-                        },
-                    )
-                    chunks_added += 1
-                    file_chunks += 1
-                except Exception as e:
-                    log.warning("ingest.qdrant_add_failed", error=str(e))
-            convos_added += 1
-            file_convos += 1
-
-        # --- index plain text (PDFs, .txt, .md, .docx) -------------------
-        if plain_text.strip():
-            for chunk in _chunk(plain_text):
-                if chunks_added >= MAX_TOTAL_CHUNKS:
-                    break
-                try:
-                    await qd.add(
-                        user_id=user.user_id,
-                        text=chunk,
-                        source=f"upload:{name}",
-                        metadata={"kind": "document", "filename": name},
-                    )
-                    chunks_added += 1
-                    file_chunks += 1
-                except Exception as e:
-                    log.warning("ingest.qdrant_add_failed", error=str(e))
-
-            facts = await _extract_facts(plain_text)
-            if facts:
-                try:
-                    msgs = [{"role": "user", "content": f"Fact about me: {x}"} for x in facts]
-                    await mem.add(
-                        user.user_id,
-                        msgs,
-                        metadata={"source": f"upload:{name}"},
-                    )
-                    facts_added += len(facts)
-                    file_facts = len(facts)
-                except Exception as e:
-                    log.warning("ingest.mem0_add_failed", error=str(e))
-
-        # Persist a row so the user can SEE what was ingested.
-        if file_chunks or file_convos:
-            try:
-                res = (
-                    sb.table("documents")
-                    .insert(
-                        {
-                            "user_id": user.user_id,
-                            "filename": name,
-                            "size_bytes": len(blob),
-                            "content_type": ctype or None,
-                            "kind": kind,
-                            "chunks_count": file_chunks,
-                            "conversations_count": file_convos,
-                            "facts_count": file_facts,
-                            "metadata": {"truncated": chunks_added >= MAX_TOTAL_CHUNKS},
-                        }
-                    )
-                    .execute()
-                )
-                if res.data:
-                    document_ids.append(res.data[0]["id"])
-            except Exception as e:
-                log.warning("ingest.document_row_failed", error=str(e))
-
-    # Mark onboarded as soon as anything was ingested
-    if chunks_added > 0 or convos_added > 0:
+        # Insert the row immediately so the user sees it in the UI right away.
         try:
-            sb.table("users").update({"metadata": {"onboarded": True}}).eq(
-                "id", user.user_id
-            ).execute()
+            res = (
+                sb.table("documents")
+                .insert(
+                    {
+                        "user_id": user.user_id,
+                        "filename": name,
+                        "size_bytes": len(blob),
+                        "content_type": ctype or None,
+                        "kind": kind,
+                        "status": "processing",
+                        "chunks_count": 0,
+                        "conversations_count": 0,
+                        "facts_count": 0,
+                    }
+                )
+                .execute()
+            )
+            doc_id = res.data[0]["id"]
         except Exception as e:
-            log.warning("ingest.onboarded_flag_failed", error=str(e))
+            skipped.append(f"{name} (db insert: {e})")
+            continue
 
-    await audit_write(
-        user_id=user.user_id,
-        actor="context",
-        action="context.ingest",
-        payload={
-            "files": len(files),
-            "chunks": chunks_added,
-            "facts": facts_added,
-            "conversations": convos_added,
-            "skipped": skipped,
-            "document_ids": document_ids,
-        },
-    )
+        # Hand the heavy work to FastAPI's background scheduler.
+        background.add_task(
+            _process_one,
+            user_id=user.user_id,
+            doc_id=doc_id,
+            filename=name,
+            plain_text=plain_text,
+            gpt_convos=gpt_convos,
+        )
 
-    return IngestSummary(
-        files=len(files) - len(skipped),
-        chunks_added=chunks_added,
-        facts_added=facts_added,
-        conversations_added=convos_added,
-        skipped=skipped,
-        document_ids=document_ids,
-    )
+        accepted.append(
+            IngestStub(document_id=doc_id, filename=name, status="processing")
+        )
+
+    return IngestResponse(accepted=accepted, skipped=skipped)
 
 
 @router.get("/documents", response_model=list[DocumentRow])
@@ -465,8 +488,6 @@ async def list_documents(user: CurrentUserDep, limit: int = 200) -> list[dict[st
 
 @router.delete("/documents/{doc_id}")
 async def delete_document(user: CurrentUserDep, doc_id: str) -> dict[str, Any]:
-    """Soft delete — only removes the row, not the underlying vectors. Those
-    are pruned by the nightly Qdrant salience job. Good enough for v1."""
     sb = supabase_admin()
     sb.table("documents").delete().eq("user_id", user.user_id).eq("id", doc_id).execute()
     return {"ok": True}
@@ -474,8 +495,6 @@ async def delete_document(user: CurrentUserDep, doc_id: str) -> dict[str, Any]:
 
 @router.post("/search", response_model=list[SearchHit])
 async def search(user: CurrentUserDep, body: SearchIn) -> list[dict[str, Any]]:
-    """Semantic recall over the user's Qdrant memory. Useful as a sanity
-    check after ingest ('did my docs actually go in?') and as a debug tool."""
     q = (body.q or "").strip()
     if not q:
         raise HTTPException(400, "missing query")
@@ -501,3 +520,8 @@ async def search(user: CurrentUserDep, body: SearchIn) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# Quiet down a lint complaint about an unused import only relevant once we
+# extend the worker with explicit concurrency primitives.
+_ = asyncio

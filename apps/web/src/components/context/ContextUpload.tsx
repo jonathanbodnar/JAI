@@ -3,11 +3,15 @@ import { useRef, useState } from "react";
 import { authHeader, BASE } from "@/lib/api";
 import { FileText, Upload, X } from "lucide-react";
 
-type IngestSummary = {
-  files: number;
-  chunks_added: number;
-  facts_added: number;
-  conversations_added: number;
+type IngestStub = {
+  document_id: string;
+  filename: string;
+  status: string;
+  error?: string | null;
+};
+
+type IngestResponse = {
+  accepted: IngestStub[];
   skipped: string[];
 };
 
@@ -20,9 +24,8 @@ export function ContextUpload() {
   const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
-  const [summary, setSummary] = useState<IngestSummary | null>(null);
+  const [summary, setSummary] = useState<IngestResponse | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [history, setHistory] = useState<IngestSummary[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function addFiles(picked: FileList | File[]) {
@@ -38,24 +41,38 @@ export function ContextUpload() {
     if (!files.length || busy) return;
     setBusy(true);
     setSummary(null);
-    setProgress(`Ingesting ${files.length} file${files.length > 1 ? "s" : ""}…`);
+    setProgress(`Uploading ${files.length} file${files.length > 1 ? "s" : ""}…`);
     try {
       const fd = new FormData();
       files.forEach((f) => fd.append("files", f));
       const headers = await authHeader();
-      const res = await fetch(`${BASE}/context/ingest`, {
-        method: "POST",
-        body: fd,
-        headers,
-      });
-      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-      const s = (await res.json()) as IngestSummary;
+      // 5 minute timeout — uploads are fast, but huge ChatGPT exports can
+      // take a while to *parse* server-side before the response returns.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 5 * 60_000);
+      let res: Response;
+      try {
+        res = await fetch(`${BASE}/context/ingest`, {
+          method: "POST",
+          body: fd,
+          headers,
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
+      const s = (await res.json()) as IngestResponse;
       setSummary(s);
-      setHistory((h) => [s, ...h].slice(0, 8));
       setFiles([]);
-      setProgress(null);
+      setProgress(
+        s.accepted.length
+          ? `Accepted ${s.accepted.length} — embedding in the background. Watch the Docs tab.`
+          : null,
+      );
     } catch (e) {
-      setProgress(`Error: ${e instanceof Error ? e.message : "unknown"}`);
+      const msg = e instanceof Error ? e.message : "unknown";
+      setProgress(`Error: ${msg}`);
     } finally {
       setBusy(false);
     }
@@ -154,52 +171,29 @@ export function ContextUpload() {
       {progress && <div className="text-xs text-[var(--fg-mute)]">{progress}</div>}
 
       {summary && <SummaryCard s={summary} />}
-
-      {history.length > 1 && (
-        <section className="pt-2">
-          <h3 className="text-xs uppercase tracking-wider text-[var(--fg-mute)] mb-2">
-            Recent uploads
-          </h3>
-          <ul className="space-y-1.5">
-            {history.slice(1).map((s, i) => (
-              <li
-                key={i}
-                className="text-xs text-[var(--fg-mute)] px-3 py-1.5 rounded bg-[var(--bg-elev)] border border-[var(--line)]"
-              >
-                {s.files} file{s.files === 1 ? "" : "s"} · {s.chunks_added} chunks ·{" "}
-                {s.facts_added} facts
-                {s.conversations_added > 0
-                  ? ` · ${s.conversations_added} chats`
-                  : ""}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
     </div>
   );
 }
 
-function SummaryCard({ s }: { s: IngestSummary }) {
+function SummaryCard({ s }: { s: IngestResponse }) {
   return (
-    <div className="rounded-lg bg-[var(--bg-elev2)] border border-[var(--line)] px-3 py-2.5 text-xs space-y-0.5">
-      <div>
-        <span className="text-[var(--ok)]">✓</span> {s.files} file
-        {s.files === 1 ? "" : "s"} ingested
-      </div>
-      <div className="text-[var(--fg-mute)]">
-        {s.chunks_added} chunks embedded into semantic memory
-      </div>
-      {s.conversations_added > 0 && (
-        <div className="text-[var(--fg-mute)]">
-          {s.conversations_added} ChatGPT conversation
-          {s.conversations_added === 1 ? "" : "s"} indexed
-        </div>
-      )}
-      {s.facts_added > 0 && (
-        <div className="text-[var(--fg-mute)]">
-          {s.facts_added} identity facts saved to long-term memory
-        </div>
+    <div className="rounded-lg bg-[var(--bg-elev2)] border border-[var(--line)] px-3 py-2.5 text-xs space-y-1.5">
+      {s.accepted.length > 0 && (
+        <>
+          <div>
+            <span className="text-[var(--ok)]">✓</span> {s.accepted.length} file
+            {s.accepted.length === 1 ? "" : "s"} accepted — processing in background
+          </div>
+          <ul className="text-[var(--fg-mute)] space-y-0.5">
+            {s.accepted.map((a) => (
+              <li key={a.document_id}>· {a.filename}</li>
+            ))}
+          </ul>
+          <div className="text-[var(--fg-mute)] italic">
+            Watch the Docs tab for status to flip from &ldquo;processing&rdquo; to
+            &ldquo;complete&rdquo;.
+          </div>
+        </>
       )}
       {s.skipped.length > 0 && (
         <div className="text-[var(--warn)]">Skipped: {s.skipped.join(", ")}</div>
