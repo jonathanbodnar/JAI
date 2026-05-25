@@ -9,7 +9,6 @@ import {
   ExternalLink,
   CircleAlert,
   Plus,
-  Trash2,
 } from "lucide-react";
 import { format, parseISO, differenceInDays } from "date-fns";
 

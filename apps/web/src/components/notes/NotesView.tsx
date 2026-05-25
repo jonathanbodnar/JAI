@@ -18,9 +18,6 @@ type Note = {
   updated_at: string;
 };
 
-const colors = [
-  "default","red","orange","yellow","green","teal","blue","dblue","purple","pink","brown","gray",
-] as const;
 
 export function NotesView() {
   const { mutate } = useSWRConfig();
@@ -70,7 +67,7 @@ export function NotesView() {
         </Masonry>
         {(!notes || notes.length === 0) && (
           <div className="px-6 py-16 text-center text-sm text-[var(--fg-mute)]">
-            No notes yet. Say "make a note: …" to JAI or tap the box above.
+            No notes yet. Say &ldquo;make a note: …&rdquo; to JAI or tap the box above.
           </div>
         )}
       </div>
@@ -215,7 +212,7 @@ function NoteCard({ n, onMutate }: { n: Note; onMutate: () => void }) {
   );
 }
 
-function colorClass(c: string) {
+function colorClass(c: string | undefined) {
   switch (c) {
     case "red":    return "bg-keep-red";
     case "orange": return "bg-keep-orange";

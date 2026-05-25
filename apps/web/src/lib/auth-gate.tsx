@@ -46,7 +46,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <div className="text-5xl">🧠</div>
       <h1 className="text-xl font-semibold">JAI</h1>
       <p className="text-sm text-[var(--fg-mute)] max-w-sm text-center">
-        Your second brain, one living conversation. Sign in with your email; we'll send
+        Your second brain, one living conversation. Sign in with your email; we&apos;ll send
         a magic link.
       </p>
       {sent ? (

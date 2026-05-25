@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # --- Google OAuth ---
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
-    google_oauth_redirect_uri: str = "http://localhost:8000/auth/google/callback"
+    google_oauth_redirect_uri: str = "https://api.jai.ftr.me/auth/google/callback"
 
     # --- Observability ---
     langsmith_api_key: str = ""
@@ -84,11 +84,10 @@ class Settings(BaseSettings):
 
     # --- App ---
     jai_user_id: str = ""           # single-tenant dev override
-    jai_backend_url: str = "http://localhost:8000"
-    jai_frontend_url: str = "http://localhost:3000"
+    jai_backend_url: str = "https://api.jai.ftr.me"
+    jai_frontend_url: str = "https://jai.ftr.me"
     cors_origins: list[str] = Field(default_factory=lambda: [
-        "http://localhost:3000",
-        "https://localhost:3000",
+        "https://jai.ftr.me",
     ])
 
     # --- Memory tuning ---

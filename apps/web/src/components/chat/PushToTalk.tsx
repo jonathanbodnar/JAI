@@ -1,5 +1,5 @@
 "use client";
-import { Mic, MicOff } from "lucide-react";
+import { Mic } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 

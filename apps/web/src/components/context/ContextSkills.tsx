@@ -3,7 +3,7 @@ import useSWR, { useSWRConfig } from "swr";
 import { useRef, useState } from "react";
 import { api, apiBase } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
-import { Download, Upload, ExternalLink, MoreVertical } from "lucide-react";
+import { Download, Upload } from "lucide-react";
 
 type Skill = {
   id: string;

@@ -130,7 +130,8 @@ create table public.skills (
   updated_at            timestamptz not null default now()
 );
 create index skills_user_active on public.skills(user_id) where is_active = true;
-create index skills_desc_emb on public.skills using hnsw (description_emb vector_cosine_ops);
+-- Note: pgvector HNSW/IVFFlat max 2000 dims; text-embedding-3-large is 3072.
+-- Sequential scan is used instead (fine for a personal skills table of <1000 rows).
 
 create table public.skill_runs (
   id              uuid primary key default gen_random_uuid(),

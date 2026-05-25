@@ -81,7 +81,7 @@ export function TasksView() {
 
         {(!tasks || tasks.length === 0) && (
           <div className="px-6 py-16 text-center text-sm text-[var(--fg-mute)]">
-            No tasks yet. Tell JAI: "remind me to ship the new pricing page tomorrow."
+            No tasks yet. Tell JAI: &ldquo;remind me to ship the new pricing page tomorrow.&rdquo;
           </div>
         )}
       </div>
