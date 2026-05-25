@@ -1,6 +1,9 @@
 import { createServerClient } from "@supabase/ssr";
+import { type ResponseCookie } from "next/dist/compiled/@edge-runtime/cookies";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
+
+type CookieToSet = { name: string; value: string; options?: Partial<ResponseCookie> };
 
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
@@ -17,10 +20,10 @@ export async function GET(request: NextRequest) {
           getAll() {
             return cookieStore.getAll();
           },
-          setAll(cookiesToSet) {
-            cookiesToSet.forEach(({ name, value, options }) => {
-              cookieStore.set(name, value, options);
-            });
+          setAll(cookiesToSet: CookieToSet[]) {
+            cookiesToSet.forEach(({ name, value, options }) =>
+              cookieStore.set(name, value, options),
+            );
           },
         },
       },
@@ -32,6 +35,5 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Something went wrong — redirect to home with an error flag
   return NextResponse.redirect(`${origin}/?error=auth`);
 }
