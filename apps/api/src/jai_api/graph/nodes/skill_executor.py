@@ -37,12 +37,29 @@ async def skill_executor(state: JaiState) -> dict:
             "role_used": "skill_executor",
         }
 
-    outcome = await run_intent(user_id=user_id, conversation_id=conversation_id, intent=text)
+    try:
+        outcome = await run_intent(
+            user_id=user_id, conversation_id=conversation_id, intent=text
+        )
+    except Exception as e:
+        log.exception("skill_executor.run_intent_failed", error=str(e))
+        msg = (
+            "I tried to run that as a skill but something failed before it "
+            f"could complete: {str(e)[:240]}. "
+            "Want me to try a different approach, or check the connection?"
+        )
+        return {
+            "final_text": msg,
+            "messages": [AIMessage(content=msg)],
+            "role_used": "skill_executor",
+        }
+
     return {
         "final_text": outcome.final_text,
         "messages": [AIMessage(content=outcome.final_text)],
         "role_used": "skill_executor",
         "skill_id": outcome.skill_id,
+        "skill_name": (outcome.raw or {}).get("skill_name") if outcome.raw else None,
     }
 
 

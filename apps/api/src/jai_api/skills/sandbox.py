@@ -45,20 +45,59 @@ class SandboxClient:
         headers = {"content-type": "application/json"}
         if self._token:
             headers["authorization"] = f"Bearer {self._token}"
-        resp = await self._client.post(
-            f"{self._base}/run",
-            json={
-                "user_id": user_id,
-                "skill_id": skill_id,
-                "language": language,
-                "source": source,
-                "env": env or {},
-                "timeout_ms": timeout_ms,
-            },
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await self._client.post(
+                f"{self._base}/run",
+                json={
+                    "user_id": user_id,
+                    "skill_id": skill_id,
+                    "language": language,
+                    "source": source,
+                    "env": env or {},
+                    "timeout_ms": timeout_ms,
+                },
+                headers=headers,
+            )
+        except httpx.RequestError as e:
+            log.warning("sandbox.request_failed", error=str(e))
+            return {
+                "status": "error",
+                "result": None,
+                "stdout": "",
+                "stderr": f"sandbox unreachable: {e}",
+                "exit_code": -1,
+                "duration_ms": 0,
+            }
+
+        # The worker now returns 200 with a structured error body even when
+        # it crashes internally — but a stray non-2xx (e.g. 401, deploy in
+        # flight) still needs graceful handling.
+        if resp.status_code >= 400:
+            body_preview = (resp.text or "")[:500]
+            log.warning(
+                "sandbox.http_error",
+                status=resp.status_code,
+                body=body_preview,
+            )
+            return {
+                "status": "error",
+                "result": None,
+                "stdout": "",
+                "stderr": f"sandbox HTTP {resp.status_code}: {body_preview}",
+                "exit_code": resp.status_code,
+                "duration_ms": 0,
+            }
+        try:
+            return resp.json()
+        except Exception as e:
+            return {
+                "status": "error",
+                "result": None,
+                "stdout": "",
+                "stderr": f"sandbox returned non-json: {e}; body={resp.text[:300]}",
+                "exit_code": -1,
+                "duration_ms": 0,
+            }
 
     async def destroy(self, user_id: str) -> None:
         if not self.configured:
