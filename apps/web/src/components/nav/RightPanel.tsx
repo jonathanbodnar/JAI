@@ -124,19 +124,6 @@ function QuickTasks() {
     }
   };
 
-  const remove = async (t: Task) => {
-    mutate(
-      `/tasks?list_id=${listId}`,
-      (cur: Task[] = []) => cur.filter((x) => x.id !== t.id),
-      false,
-    );
-    try {
-      await api(`/tasks/${t.id}`, { method: "DELETE" });
-    } finally {
-      mutate(`/tasks?list_id=${listId}`);
-    }
-  };
-
   const saveRename = async (id: string) => {
     const title = editTitle.trim();
     setEditingId(null);
@@ -204,20 +191,19 @@ function QuickTasks() {
           open.map((t) => (
             <div
               key={t.id}
-              className="group/row flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-white/5"
+              className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-white/5"
             >
               <button
                 type="button"
                 onClick={() => toggle(t)}
-                aria-label={t.status === "completed" ? "Mark incomplete" : "Mark complete"}
-                className={cn(
-                  "mt-0.5 w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center transition-all",
-                  t.status === "completed"
-                    ? "bg-emerald-500 border-emerald-500"
-                    : "border-[#5a5d61] hover:border-[var(--accent)]",
-                )}
+                aria-label="Mark complete"
+                title="Mark complete"
+                className="w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center transition-all border-[#5a5d61] hover:border-[var(--accent)] hover:bg-[var(--accent)]/10"
               >
-                {t.status === "completed" && <Check size={9} className="text-white" />}
+                <Check
+                  size={9}
+                  className="text-[var(--accent)] opacity-0 hover:opacity-100 transition-opacity"
+                />
               </button>
 
               {editingId === t.id ? (
@@ -230,40 +216,21 @@ function QuickTasks() {
                     if (e.key === "Enter") void saveRename(t.id);
                     if (e.key === "Escape") setEditingId(null);
                   }}
-                  className="flex-1 bg-transparent outline-none text-[13px] text-[#e3e3e3] border-b border-[var(--accent)]/40"
+                  className="flex-1 bg-transparent outline-none text-[13px] text-[#e3e3e3] border-b border-[var(--accent)]/40 leading-snug"
                 />
               ) : (
                 <button
                   type="button"
-                  onDoubleClick={() => {
+                  onClick={() => {
                     setEditingId(t.id);
                     setEditTitle(t.title);
                   }}
-                  onClick={() => toggle(t)}
-                  className="text-left flex-1 min-w-0"
-                  title="Double-click to rename"
+                  className="text-left flex-1 min-w-0 text-[13px] leading-snug break-words text-[#e3e3e3]"
+                  title="Click to edit"
                 >
-                  <span
-                    className={cn(
-                      "text-[13px] leading-snug break-words",
-                      t.status === "completed"
-                        ? "line-through text-[#8e918f]"
-                        : "text-[#e3e3e3]",
-                    )}
-                  >
-                    {t.title}
-                  </span>
+                  {t.title}
                 </button>
               )}
-
-              <button
-                type="button"
-                onClick={() => void remove(t)}
-                title="Delete task"
-                className="opacity-0 group-hover/row:opacity-100 transition-opacity p-1 rounded hover:bg-white/5 text-[#8e918f] hover:text-red-400"
-              >
-                <Trash2 size={12} />
-              </button>
             </div>
           ))
         )}
