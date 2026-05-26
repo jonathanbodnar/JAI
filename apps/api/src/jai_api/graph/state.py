@@ -40,8 +40,16 @@ class JaiState(TypedDict, total=False):
     pending_tool_calls: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
     skill_id: str | None
+    skill_name: str | None
     skill_inputs: dict[str, Any] | None
     skill_output: dict[str, Any] | None
+    # ISO timestamp of when skill_output was last set. Lets follow-up
+    # turns decide whether the cached output is still relevant ("filter
+    # that summary…") or too stale to reach back into.
+    skill_output_at: str | None
+    # User-facing text of the LAST skill summary, kept so the responder
+    # can quote it verbatim instead of having to dig through messages.
+    skill_output_summary: str | None
 
     # --- final ---
     final_text: str | None

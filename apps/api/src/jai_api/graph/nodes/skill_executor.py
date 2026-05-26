@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -90,6 +91,8 @@ async def skill_executor(state: JaiState) -> dict:
         "skill_id": outcome.skill_id,
         "skill_name": skill_name,
         "skill_output": result if isinstance(result, dict) else {"value": result},
+        "skill_output_at": datetime.now(timezone.utc).isoformat(),
+        "skill_output_summary": final_text,
     }
 
 

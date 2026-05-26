@@ -11,6 +11,7 @@ ONLY routes — actual drafting lives downstream:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import structlog
@@ -72,6 +73,26 @@ def _format_memory(state: JaiState) -> str:
     return "\n".join(parts) if parts else "(no memory retrieved)"
 
 
+_REFINEMENT_TTL = timedelta(minutes=20)
+
+
+def _has_recent_skill_output(state: JaiState) -> bool:
+    """True if the previous turn produced skill data that's still fresh
+    enough for a follow-up to refer back to. Keeps the orchestrator
+    hint cheap — no need to inspect the actual payload here.
+    """
+    if not state.get("skill_output"):
+        return False
+    when = state.get("skill_output_at")
+    if not when:
+        return True
+    try:
+        ts = datetime.fromisoformat(when)
+        return datetime.now(timezone.utc) - ts < _REFINEMENT_TTL
+    except Exception:
+        return True
+
+
 async def orchestrator(state: JaiState) -> dict:
     # Use FAST role for routing — orchestration is ~80% structured routing
     # and ~20% short-form drafts. A fast model finishes in 600–1500ms vs
@@ -80,9 +101,22 @@ async def orchestrator(state: JaiState) -> dict:
     structured = llm.with_structured_output(OrchestratorDecision)
 
     memory_block = _format_memory(state)
-    sys = SystemMessage(
-        content=ORCHESTRATOR_SYSTEM + "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
-    )
+    sys_text = ORCHESTRATOR_SYSTEM + "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
+    if _has_recent_skill_output(state):
+        skill_name = state.get("skill_name") or "a skill"
+        sys_text += (
+            "\n\n=== RECENT CONTEXT ===\n"
+            f"The previous assistant turn was a result from {skill_name} and "
+            "the raw data is still cached in scope. If the current user "
+            "message is a refinement, filter, exclusion, or commentary on "
+            "that result (\"only the personal ones\", \"not junk\", \"without "
+            "GitHub noise\", \"actually just from X\", etc.), pick \"respond\" "
+            "— the responder can re-derive from the cached data without "
+            "re-running the skill. Only pick \"skill\" again if the user is "
+            "asking for genuinely NEW data (different query, fresh fetch, "
+            "different action)."
+        )
+    sys = SystemMessage(content=sys_text)
 
     # Smaller window also helps latency — 10 turns is plenty for routing.
     window = (state.get("messages") or [])[-10:]
