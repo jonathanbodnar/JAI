@@ -84,8 +84,15 @@ async def run_intent(
         return SkillOutcome(final_text=ask, needs_credentials=real_needs)
 
     if not (draft.language and draft.source and draft.title and draft.description):
+        # If the builder gave us a specific explanation (e.g. the JSON
+        # parse fallback), surface that instead of the generic apology
+        # — it carries more actionable info for the user.
+        explanation = (draft.explanation or "").strip()
         return SkillOutcome(
-            final_text="I couldn't build a skill for that — could you rephrase what you want me to do?"
+            final_text=(
+                explanation
+                or "I couldn't build a skill for that — could you rephrase what you want me to do?"
+            )
         )
 
     # Last-mile dedup. Even after a permissive match miss, the builder's

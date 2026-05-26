@@ -58,7 +58,31 @@ async def build_skill(
         human_parts.append(f"\nContext from prior conversation:\n{context_hint}")
     human = HumanMessage(content="\n".join(human_parts))
 
-    draft: SkillDraft = await structured.ainvoke([sys, human])
+    # Structured-output parsing on Qwen Max can fail when the model emits
+    # a very long `source` field with literal newlines that don't escape
+    # cleanly into the tool-call JSON. Surface a friendly draft instead
+    # of crashing the entire graph turn — the caller will route the
+    # explanation back to the user.
+    try:
+        draft: SkillDraft = await structured.ainvoke([sys, human])
+    except Exception as e:
+        log.warning(
+            "skill.build.parse_failed",
+            error=str(e)[:300],
+            error_type=type(e).__name__,
+            goal=goal[:120],
+        )
+        return SkillDraft(
+            explanation=(
+                "I couldn't generate a clean skill for that — the script "
+                "draft came back malformed. Try rephrasing the request, or "
+                "if you're asking me to transform data we already have "
+                "in scope, just say \"go\" or \"do it\" and I'll work from "
+                "the cached result."
+            ),
+            need_credentials=[],
+            uses_credentials=[],
+        )
 
     # Belt-and-suspenders: scan the source for env var references and
     # union with whatever the LLM declared. LLMs sometimes forget to

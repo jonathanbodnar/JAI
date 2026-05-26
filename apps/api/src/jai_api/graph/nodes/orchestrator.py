@@ -108,19 +108,41 @@ async def orchestrator(state: JaiState) -> dict:
             "\n\n=== RECENT CONTEXT ===\n"
             f"The previous assistant turn was a result from {skill_name} and "
             "the raw data is still cached in scope. If the current user "
-            "message is a refinement, filter, exclusion, or commentary on "
-            "that result (\"only the personal ones\", \"not junk\", \"without "
-            "GitHub noise\", \"actually just from X\", etc.), pick \"respond\" "
-            "— the responder can re-derive from the cached data without "
-            "re-running the skill. Only pick \"skill\" again if the user is "
-            "asking for genuinely NEW data (different query, fresh fetch, "
-            "different action)."
+            "message is a refinement, filter, exclusion, transformation, "
+            "templating, formatting, or commentary on that result "
+            "(\"only the personal ones\", \"not junk\", \"render per row\", "
+            "\"now write the DM for each\", \"format as table\", \"use that "
+            "to draft X\", \"go\", \"do it\", etc.), pick \"respond\" — the "
+            "responder can re-derive from the cached data without re-running "
+            "the skill. Only pick \"skill\" again if the user is asking for "
+            "genuinely NEW data (different query, fresh fetch, different "
+            "action like sending an email or creating an event)."
         )
     sys = SystemMessage(content=sys_text)
 
     # Smaller window also helps latency — 10 turns is plenty for routing.
     window = (state.get("messages") or [])[-10:]
-    decision: OrchestratorDecision = await structured.ainvoke([sys, *window])
+
+    # Structured-output parse failures bubble up as JSONDecodeError /
+    # ValidationError and crash the whole graph turn. That's a terrible
+    # UX — the user just sees "Expecting value: line 237 column 1". Catch
+    # any parse failure and fall back to the responder, which always
+    # generates SOMETHING. Log the raw failure so we can debug afterward.
+    try:
+        decision: OrchestratorDecision = await structured.ainvoke([sys, *window])
+    except Exception as e:  # JSONDecodeError, ValidationError, OutputParserException, etc.
+        log.warning(
+            "orchestrator.parse_failed",
+            error=str(e)[:300],
+            error_type=type(e).__name__,
+        )
+        # Default to respond — Kimi will handle whatever the user said,
+        # cached skill data is still in state for follow-up patterns.
+        return {
+            "route": "respond",
+            "route_reason": "orchestrator parse fell back to respond",
+            "role_used": "orchestrator",
+        }
 
     log.info("orchestrator.route", route=decision.route, reason=decision.reason)
 

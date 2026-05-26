@@ -363,6 +363,34 @@ async def _primary_conversation_id(sb, user_id: str) -> str:
     return ins.data[0]["id"]
 
 
+def _friendly_graph_error(e: BaseException) -> str:
+    """Translate raw graph failures into something a human can act on.
+
+    The two we see in practice:
+      - LLM structured-output returned text json.loads can't parse
+        ("Expecting value: line X column Y") — almost always a Gemini
+        flash glitch on a long context. User should just retry.
+      - LangChain OutputParserException — same family of issue.
+    Anything we don't recognize gets a short generic line plus the
+    error class so we can grep for it in logs.
+    """
+    msg = str(e)
+    name = type(e).__name__
+    if "Expecting value" in msg or "JSONDecodeError" in name or "OutputParserException" in name:
+        return (
+            "I hiccupped parsing my own routing response — that usually "
+            "clears with a retry. Send the message again, or break a "
+            "long prompt into two smaller ones."
+        )
+    if "TimeoutError" in name or "timeout" in msg.lower():
+        return "That turn timed out talking to a model. Try again in a sec."
+    if "Connection" in name:
+        return "Network blip talking to a model. Try again."
+    # Generic fallback — keep the class name so we can identify the
+    # category from chat logs without exposing the full stack to the user.
+    return f"Something went wrong while thinking ({name}). Try again or rephrase."
+
+
 _STEP_LABELS = {
     "ingest": ("Reading your message", "Parsing intent & context"),
     "fast_intent": ("Checking quick actions", "Matching against built-in patterns"),
@@ -430,14 +458,18 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
         canvas = accumulated.get("canvas")
     except Exception as e:
         log.exception("graph.invoke.failed", error=str(e))
+        # Translate well-known LLM-side parse failures into something the
+        # user can actually act on. The raw "Expecting value: line 237
+        # column 1 (char 1298)" is correct but baffling for a human.
+        friendly = _friendly_graph_error(e)
         try:
-            await ws.send_json({"type": "error", "message": f"graph failed: {e}"})
+            await ws.send_json({"type": "error", "message": friendly})
         except Exception:
             pass
         # Persist the error so the user sees it on reload instead of a blank
         # response (they may have switched away during streaming).
-        if sb and final_text == "":
-            final_text = f"Something went wrong: {str(e)[:200]}"
+        if sb and not final_text:
+            final_text = friendly
         if not final_text:
             return
 
