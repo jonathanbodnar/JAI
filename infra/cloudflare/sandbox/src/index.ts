@@ -43,9 +43,9 @@ type RunBody = {
 };
 
 const FILE_BY_LANG = {
-  // Cloudflare's official sandbox image ships `python3` only — there is no
-  // bare `python` symlink. Invoking the wrong binary fails with
-  // "python: command not found" before the script even gets a chance to run.
+  // Cloudflare's official python image symlinks both `python3` and
+  // `python3.11` to /usr/local/bin/python3.11; we use `python3` so the
+  // same code works against any image variant.
   python: { path: "/workspace/skill.py", cmd: "python3 /workspace/skill.py" },
   typescript: { path: "/workspace/skill.ts", cmd: "tsx /workspace/skill.ts" },
   bash: { path: "/workspace/skill.sh", cmd: "bash /workspace/skill.sh" },
@@ -55,56 +55,39 @@ const ENV_FILE = "/workspace/.env.json";
 const PIP_MARKER = "/workspace/.pip-installed";
 const NPM_MARKER = "/workspace/.npm-installed";
 
-// Packages JAI skills routinely need. Installed lazily on first run per
-// container instance and then cached (via the marker file) so subsequent
-// runs skip straight to executing the user script.
+// Packages JAI skills routinely need. Installed once per container
+// instance (cached via marker file). Keep the list lean — broader sets
+// stretch first-run install time past the user's patience.
 const PIP_PACKAGES = [
   "httpx",
-  "pydantic",
   "google-api-python-client",
   "google-auth",
   "google-auth-oauthlib",
   "google-auth-httplib2",
-  "notion-client",
-  "slack-sdk",
   "supabase",
-  "beautifulsoup4",
   "python-dateutil",
-].join(" ");
+];
 
-const NPM_PACKAGES = ["tsx", "typescript"].join(" ");
+const NPM_PACKAGES = ["tsx", "typescript"];
 
-// Bootstrap snippets injected at the top of every script:
-//   1. Load env vars from /workspace/.env.json (bulletproof for OAuth blobs)
-//   2. Lazy-install language-specific deps on first run (cached afterward)
+// Per-language env-loader prelude prepended to the user script. The
+// prelude does NOT install packages anymore — installation is a separate
+// pre-step that runs visibly so errors surface to the user immediately.
 const PRELUDE: Record<keyof typeof FILE_BY_LANG, string> = {
   python:
-    "import os, json, subprocess, sys\n" +
+    "import os, json\n" +
     "try:\n" +
     `    with open(${JSON.stringify(ENV_FILE)}) as _f:\n` +
     "        for _k, _v in json.load(_f).items():\n" +
     "            if isinstance(_v, str):\n" +
     "                os.environ[_k] = _v\n" +
     "except Exception:\n" +
-    "    pass\n" +
-    `if not os.path.exists(${JSON.stringify(PIP_MARKER)}):\n` +
-    "    try:\n" +
-    `        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir"] + ${JSON.stringify(
-      PIP_PACKAGES.split(" "),
-    )}, check=True)\n` +
-    `        open(${JSON.stringify(PIP_MARKER)}, "w").close()\n` +
-    "    except Exception as _e:\n" +
-    '        print(f"[jai-prelude] pip install warning: {_e}", file=sys.stderr)\n',
+    "    pass\n",
   typescript:
-    `import fs from "node:fs"; import { execSync } from "node:child_process";\n` +
+    `import fs from "node:fs";\n` +
     `try { const _e = JSON.parse(fs.readFileSync(${JSON.stringify(
       ENV_FILE,
-    )}, "utf8")); for (const [k, v] of Object.entries(_e)) { if (typeof v === "string") process.env[k] = v; } } catch {}\n` +
-    `if (!fs.existsSync(${JSON.stringify(NPM_MARKER)})) {\n` +
-    `  try { execSync("npm install -g ${NPM_PACKAGES}", { stdio: "ignore" }); fs.writeFileSync(${JSON.stringify(
-      NPM_MARKER,
-    )}, ""); } catch (e) { console.error("[jai-prelude] npm install warning:", e); }\n` +
-    `}\n`,
+    )}, "utf8")); for (const [k, v] of Object.entries(_e)) { if (typeof v === "string") process.env[k] = v; } } catch {}\n`,
   bash:
     `# bash skills can load env vars via:\n` +
     `#   eval "$(python3 -c 'import json,os,shlex; j=json.load(open(\\"${ENV_FILE}\\")); [print(f\"export {k}={shlex.quote(v)}\") for k,v in j.items() if isinstance(v,str)]')"\n`,
@@ -181,6 +164,8 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
   }
 
   let stdout = "", stderr = "", exit_code = -1;
+  let install_log = "";
+
   try {
     const sb = getSandbox(env.Sandbox, body.user_id);
     await sb.mkdir("/workspace", { recursive: true });
@@ -190,6 +175,12 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
     // and stuffs everything into the runtime env.
     const envObj = body.env ?? {};
     await sb.writeFile(ENV_FILE, JSON.stringify(envObj));
+
+    // Install language deps if we haven't done it for this container yet.
+    // This is intentionally a SEPARATE exec call so pip / npm errors surface
+    // as their own stderr block instead of getting tangled with the user
+    // script's import traceback.
+    install_log = await ensureDepsInstalled(sb, body.language);
 
     const prelude = PRELUDE[body.language];
     await sb.writeFile(target.path, prelude + body.source);
@@ -206,6 +197,12 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
     exit_code = -1;
   }
 
+  // Prepend install_log to stderr so the API → user diagnostic captures
+  // dep-install problems instead of just a misleading ImportError.
+  const stderr_combined = install_log
+    ? `--- install log ---\n${install_log}\n--- skill stderr ---\n${stderr}`
+    : stderr;
+
   const parsed = parseLastJson(stdout);
   const duration_ms = Date.now() - started;
 
@@ -213,10 +210,50 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
     status: parsed?.status === "ok" ? "ok" : (exit_code === 0 && parsed === null ? "ok" : "error"),
     result: parsed?.result ?? null,
     stdout,
-    stderr,
+    stderr: stderr_combined,
     exit_code,
     duration_ms,
   });
+}
+
+// Lazy install of common Python/Node packages. Runs once per container
+// instance; the marker file persists for the lifetime of the DO. Returns
+// a (possibly empty) log string when an install actually ran or failed
+// so callers can include it in user-facing diagnostics.
+async function ensureDepsInstalled(
+  sb: ReturnType<typeof getSandbox>,
+  language: keyof typeof FILE_BY_LANG,
+): Promise<string> {
+  if (language === "python") {
+    // Skip if already done.
+    const check = await sb.exec(`test -f ${PIP_MARKER} && echo HIT || echo MISS`, {
+      timeout: 5_000,
+    });
+    if ((check.stdout ?? "").trim() === "HIT") return "";
+
+    const pkgs = PIP_PACKAGES.join(" ");
+    const cmd = `python3 -m pip install --no-cache-dir --disable-pip-version-check ${pkgs} 2>&1 && touch ${PIP_MARKER}`;
+    const res = await sb.exec(cmd, { timeout: 240_000 });
+    const log = (res.stdout ?? "") + (res.stderr ?? "");
+    const ok = res.exitCode === 0 || res.success;
+    return ok ? "" : `pip install FAILED (exit ${res.exitCode ?? "?"}):\n${log}`;
+  }
+
+  if (language === "typescript") {
+    const check = await sb.exec(`test -f ${NPM_MARKER} && echo HIT || echo MISS`, {
+      timeout: 5_000,
+    });
+    if ((check.stdout ?? "").trim() === "HIT") return "";
+
+    const pkgs = NPM_PACKAGES.join(" ");
+    const cmd = `npm install -g ${pkgs} 2>&1 && touch ${NPM_MARKER}`;
+    const res = await sb.exec(cmd, { timeout: 180_000 });
+    const log = (res.stdout ?? "") + (res.stderr ?? "");
+    const ok = res.exitCode === 0 || res.success;
+    return ok ? "" : `npm install FAILED (exit ${res.exitCode ?? "?"}):\n${log}`;
+  }
+
+  return "";
 }
 
 function parseLastJson(s: string): { status?: string; result?: unknown; error?: string } | null {
