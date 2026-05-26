@@ -406,6 +406,12 @@ def _platform_env(user_id: str) -> dict[str, str]:
         env["JAI_SUPABASE_KEY"] = s.supabase_service_role_key
     if s.jai_backend_url:
         env["JAI_BACKEND_URL"] = s.jai_backend_url
+    # OpenRouter access is needed by skills that draft text (e.g. email
+    # composers). The sandbox is isolated so exposing the platform key
+    # here is fine, but skills MUST treat this like any other secret —
+    # never log or echo it back to the user.
+    if s.openrouter_api_key:
+        env["OPENROUTER_API_KEY"] = s.openrouter_api_key
     env["JAI_USER_ID"] = user_id
     return env
 
@@ -432,7 +438,10 @@ async def _user_credential_keys(user_id: str) -> list[str]:
         log.warning("creds.list_failed", error=str(e))
 
     # 2) JAI platform vars (always injected).
-    keys.extend(["JAI_SUPABASE_URL", "JAI_SUPABASE_KEY", "JAI_USER_ID", "JAI_BACKEND_URL"])
+    keys.extend([
+        "JAI_SUPABASE_URL", "JAI_SUPABASE_KEY", "JAI_USER_ID", "JAI_BACKEND_URL",
+        "OPENROUTER_API_KEY",
+    ])
 
     # 3) External Supabase data sources.
     try:

@@ -99,6 +99,8 @@ _PLATFORM_KEYS = {
     "JAI_SUPABASE_KEY",
     "JAI_USER_ID",
     "JAI_BACKEND_URL",
+    # OpenRouter platform key — auto-injected for skills that draft text.
+    "OPENROUTER_API_KEY",
     # External Supabase projects connected via Settings → Data Sources
     "SUPABASE_PROJECTS_JSON",
     # Multi-account OAuth blobs (auto-injected from connected_accounts)
