@@ -1,10 +1,32 @@
 "use client";
 import { apiBase, wsToken } from "./api";
 
+export type CanvasAction = {
+  id: string;
+  label: string;
+  prompt: string;
+  is_template?: boolean;
+};
+
+export type CanvasPayload = {
+  kind: "email_draft" | "document" | "code" | "plan" | "list";
+  title: string;
+  content: string;
+  language?: string;
+  metadata?: Record<string, unknown> | null;
+  actions?: CanvasAction[];
+  source_skill?: string | null;
+};
+
 export type ServerMsg =
   | { type: "user_transcript"; text: string }
   | { type: "assistant_delta"; text: string }
-  | { type: "assistant_final"; text: string; role_used?: string }
+  | {
+      type: "assistant_final";
+      text: string;
+      role_used?: string;
+      canvas?: CanvasPayload | null;
+    }
   | { type: "step"; node: string; label: string; detail?: string | null }
   | { type: "audio_chunk"; b64: string }
   | { type: "audio_done"; skipped?: boolean }

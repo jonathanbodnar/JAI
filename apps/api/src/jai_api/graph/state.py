@@ -51,6 +51,23 @@ class JaiState(TypedDict, total=False):
     # can quote it verbatim instead of having to dig through messages.
     skill_output_summary: str | None
 
+    # --- canvas ---
+    # When a turn produces a long-form artifact (email draft, document,
+    # code, plan), the executor attaches a canvas payload that the chat
+    # client opens in a side panel instead of truncating into a bubble.
+    #   {
+    #     "kind": "email_draft" | "document" | "code" | "plan" | "list",
+    #     "title": str,
+    #     "content": str,            # full body in the canvas's native format
+    #     "language": str | None,    # markdown / python / ...
+    #     "metadata": dict | None,   # kind-specific (e.g. to/subject/draft_id)
+    #     "actions": [               # buttons the canvas can offer
+    #         {"id": "send", "label": "Send", "prompt": "send the draft"},
+    #         ...
+    #     ],
+    #   }
+    canvas: dict[str, Any] | None
+
     # --- final ---
     final_text: str | None
     final_audio_url: str | None

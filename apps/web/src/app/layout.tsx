@@ -7,6 +7,7 @@ import { Sidebar } from "@/components/nav/Sidebar";
 import { AuthGate } from "@/lib/auth-gate";
 import { OnboardingGate } from "@/components/onboarding/Onboarding";
 import { ServiceWorkerTamer } from "@/lib/sw-tame";
+import { CanvasPanel } from "@/components/canvas/CanvasPanel";
 
 export const metadata: Metadata = {
   title: "JAI",
@@ -49,6 +50,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <BottomNav />
             </div>
             <RightPanel />
+            <CanvasPanel />
           </OnboardingGate>
         </AuthGate>
       </body>

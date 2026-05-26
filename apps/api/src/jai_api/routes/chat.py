@@ -8,7 +8,8 @@ Wire format (JSON each frame):
 
   server -> client
     {"type":"assistant_delta", "text":"..."}      # partial text chunk
-    {"type":"assistant_final", "text":"...", "role_used":"orchestrator"}
+    {"type":"assistant_final", "text":"...", "role_used":"orchestrator",
+     "canvas": {...} | null}                       # canvas payload (see state.JaiState.canvas)
     {"type":"audio_chunk", "b64":"..."}            # mp3 frame
     {"type":"audio_done"}
     {"type":"error", "message":"..."}
@@ -374,6 +375,7 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
 
     final_text = ""
     role_used: str | None = None
+    canvas: dict | None = None
     try:
         # Stream node-level updates so the client can render "thinking steps"
         # like Cursor. We still need the final state, so we accumulate it.
@@ -397,6 +399,7 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
                     accumulated.update(delta)
         final_text = (accumulated.get("final_text") or "").strip() or "(no response)"
         role_used = accumulated.get("role_used")
+        canvas = accumulated.get("canvas")
     except Exception as e:
         log.exception("graph.invoke.failed", error=str(e))
         try:
@@ -412,6 +415,11 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
 
     # Persist the assistant turn FIRST — before sending — so a mid-turn
     # disconnect can't lose the response. The user reloads and sees it.
+    meta: dict = {}
+    if role_used:
+        meta["role_used"] = role_used
+    if canvas:
+        meta["canvas"] = canvas
     if sb:
         async def _insert_assistant():
             try:
@@ -421,7 +429,7 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
                         "user_id": user.user_id,
                         "role": "assistant",
                         "content": final_text,
-                        "metadata": {"role_used": role_used} if role_used else {},
+                        "metadata": meta,
                     }).execute()
                 )
             except Exception as e:
@@ -435,6 +443,7 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
             "type": "assistant_final",
             "text": final_text,
             "role_used": role_used,
+            "canvas": canvas,
         })
     except Exception:
         log.info("chat.assistant_final.ws_closed", conv=conv_id)

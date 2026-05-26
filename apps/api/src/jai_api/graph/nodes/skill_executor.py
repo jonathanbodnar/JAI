@@ -68,6 +68,12 @@ async def skill_executor(state: JaiState) -> dict:
     result = raw.get("result")
     skill_name = raw.get("skill_name")
 
+    # Build a canvas payload BEFORE synthesizing the chat reply. If we
+    # know the artifact will live on the canvas, we tell the LLM to keep
+    # the chat bubble to a tight 1-2 line headline instead of trying to
+    # squeeze the whole draft into the message.
+    canvas = _build_canvas(result, skill_name=skill_name)
+
     # If the skill returned structured data, hand it to Kimi so the user
     # gets a real answer instead of a dict dump. Errors / credential asks
     # keep the runner's already-formatted text.
@@ -78,13 +84,14 @@ async def skill_executor(state: JaiState) -> dict:
                 skill_name=skill_name,
                 result=result,
                 first_run=bool(raw.get("first_run")),
+                canvas=canvas,
             )
         except Exception as e:
             log.warning("skill_executor.synthesize_failed", error=str(e))
             # Fall through to the runner's raw preview rather than dropping
             # the result entirely.
 
-    return {
+    out: dict = {
         "final_text": final_text,
         "messages": [AIMessage(content=final_text)],
         "role_used": "skill_executor",
@@ -94,6 +101,137 @@ async def skill_executor(state: JaiState) -> dict:
         "skill_output_at": datetime.now(timezone.utc).isoformat(),
         "skill_output_summary": final_text,
     }
+    if canvas:
+        out["canvas"] = canvas
+    return out
+
+
+# --- Canvas extraction ------------------------------------------------------
+#
+# Skills that produce long-form artifacts (drafts, docs, plans, code) flag
+# them by returning a `kind` field in their result. We turn that into a
+# canvas payload here so the chat client can render the full content in a
+# side panel — like ChatGPT Canvas — without burning chat real-estate on a
+# 40-line email body.
+
+_CANVAS_KINDS = {"email_draft", "document", "code", "plan", "list"}
+
+
+def _build_canvas(result, *, skill_name: str | None) -> dict | None:
+    """If the skill emitted a canvas-worthy artifact, return a normalized
+    payload. Otherwise return None.
+
+    We bias toward declaring less rather than more: only known `kind`
+    values get a canvas, and we always require enough content to be
+    worth opening a side panel (>= 240 chars or a multi-field record).
+    """
+    if not isinstance(result, dict):
+        return None
+    kind = (result.get("kind") or "").strip().lower()
+    if kind not in _CANVAS_KINDS:
+        return None
+
+    if kind == "email_draft":
+        body = (result.get("body") or "").strip()
+        subject = (result.get("subject") or "").strip()
+        if not body and not subject:
+            return None
+        return {
+            "kind": "email_draft",
+            "title": f"Email to {result.get('to') or 'recipient'}",
+            "content": body,
+            "language": "markdown",
+            "metadata": {
+                "to": result.get("to"),
+                "from": result.get("account"),
+                "subject": subject,
+                "tone": result.get("tone"),
+                "draft_id": result.get("draft_id"),
+                "message_id": result.get("message_id"),
+                "saved_to": result.get("saved_to"),
+            },
+            "actions": [
+                {"id": "send", "label": "Send", "prompt": "send the draft"},
+                {
+                    "id": "refine",
+                    "label": "Refine",
+                    "prompt": "make these edits to the draft: ",
+                    "is_template": True,
+                },
+            ],
+            "source_skill": skill_name,
+        }
+
+    if kind == "document":
+        content = (result.get("content") or result.get("body") or "").strip()
+        if len(content) < 80:
+            return None
+        return {
+            "kind": "document",
+            "title": (result.get("title") or "Document").strip() or "Document",
+            "content": content,
+            "language": (result.get("language") or "markdown"),
+            "metadata": result.get("metadata") or {},
+            "actions": [],
+            "source_skill": skill_name,
+        }
+
+    if kind == "code":
+        content = (result.get("content") or result.get("source") or "").strip()
+        if len(content) < 40:
+            return None
+        return {
+            "kind": "code",
+            "title": (result.get("title") or "Code").strip() or "Code",
+            "content": content,
+            "language": (result.get("language") or "python"),
+            "metadata": result.get("metadata") or {},
+            "actions": [],
+            "source_skill": skill_name,
+        }
+
+    if kind == "plan":
+        content = (result.get("content") or result.get("body") or "").strip()
+        if len(content) < 120:
+            return None
+        return {
+            "kind": "plan",
+            "title": (result.get("title") or "Plan").strip() or "Plan",
+            "content": content,
+            "language": "markdown",
+            "metadata": result.get("metadata") or {},
+            "actions": [],
+            "source_skill": skill_name,
+        }
+
+    if kind == "list":
+        items = result.get("items") or []
+        if not isinstance(items, list) or len(items) < 5:
+            return None
+        # Render as a markdown bullet list so the canvas has a single
+        # source of truth.
+        lines = []
+        for it in items:
+            if isinstance(it, str):
+                lines.append(f"- {it}")
+            elif isinstance(it, dict):
+                head = it.get("title") or it.get("name") or it.get("text") or ""
+                body = it.get("description") or it.get("body") or ""
+                lines.append(f"- **{head}**" + (f" — {body}" if body else ""))
+        content = "\n".join(lines).strip()
+        if not content:
+            return None
+        return {
+            "kind": "list",
+            "title": (result.get("title") or "List").strip() or "List",
+            "content": content,
+            "language": "markdown",
+            "metadata": result.get("metadata") or {},
+            "actions": [],
+            "source_skill": skill_name,
+        }
+
+    return None
 
 
 def _trim_for_synthesis(value, depth: int = 0):
@@ -175,35 +313,78 @@ say so in one short sentence and suggest the next thing to try.
 """
 
 
+_SYNTHESIZE_CANVAS_SYSTEM = """You are JAI replying in chat. A skill just
+produced a long-form artifact (email draft, document, code, plan) that
+the UI is rendering in a side **canvas** the user can already see and
+edit.
+
+Your reply lives in the chat bubble next to it. Keep it tight:
+- 1-2 sentences MAX. Headline-only.
+- Lead with what you did + key context the canvas doesn't already show
+  on the surface (e.g. recipient + subject for emails, language for code).
+- Don't repeat the full body. The canvas IS the body.
+- End with a soft pointer to the canvas actions ("Hit Send or tell me
+  what to change.") only when there are user-facing actions.
+- No "Here's...", no preamble, no markdown headings.
+
+If the skill explicitly returned an error or the artifact is empty,
+say that plainly instead.
+"""
+
+
 async def _synthesize_result(
     *,
     user_ask: str,
     skill_name: str | None,
     result,
     first_run: bool,
+    canvas: dict | None = None,
 ) -> str:
-    """Have Kimi (RESPOND role) rewrite the skill's structured data."""
+    """Have Kimi (RESPOND role) rewrite the skill's structured data.
+
+    When the skill emitted a canvas-worthy artifact, we switch to a
+    short headline-style reply because the full content lives in the
+    canvas panel next to the bubble.
+    """
     trimmed = _trim_for_synthesis(result)
     try:
         payload = json.dumps(trimmed, default=str, indent=2)
     except Exception:
         payload = str(trimmed)
-    # Cap at 12k chars after trimming — Kimi has room for ~32k context
-    # but we want to keep the answer focused and fast.
     if len(payload) > 12000:
         payload = payload[:12000] + "\n…(truncated)"
 
     skill_hint = f" (via skill: {skill_name})" if skill_name else ""
-    human_content = (
-        f"User asked: {user_ask}\n\n"
-        f"The skill ran successfully{skill_hint}. Here is what it returned:\n\n"
-        f"```json\n{payload}\n```\n\n"
-        "Write the user-facing answer now."
-    )
+
+    if canvas:
+        system = _SYNTHESIZE_CANVAS_SYSTEM
+        canvas_meta = {
+            "kind": canvas.get("kind"),
+            "title": canvas.get("title"),
+            "metadata": canvas.get("metadata"),
+            "actions": [a.get("label") for a in (canvas.get("actions") or [])],
+        }
+        human_content = (
+            f"User asked: {user_ask}\n\n"
+            f"The skill ran successfully{skill_hint} and produced a canvas:\n\n"
+            f"```json\n{json.dumps(canvas_meta, default=str, indent=2)}\n```\n\n"
+            "Raw skill result (FYI only — DO NOT paste it into the reply):\n\n"
+            f"```json\n{payload}\n```\n\n"
+            "Write the chat-bubble reply now. Remember: 1-2 sentences, "
+            "the canvas already shows the body."
+        )
+    else:
+        system = _SYNTHESIZE_SYSTEM
+        human_content = (
+            f"User asked: {user_ask}\n\n"
+            f"The skill ran successfully{skill_hint}. Here is what it returned:\n\n"
+            f"```json\n{payload}\n```\n\n"
+            "Write the user-facing answer now."
+        )
 
     llm = chat_for(Role.RESPOND, temperature=0.4, streaming=False)
     res = await llm.ainvoke([
-        SystemMessage(content=_SYNTHESIZE_SYSTEM),
+        SystemMessage(content=system),
         HumanMessage(content=human_content),
     ])
     text = res.content if isinstance(res.content, str) else str(res.content)

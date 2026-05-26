@@ -78,6 +78,26 @@ export function Composer({
     };
   }, [onTalkEnd]);
 
+  // Lets the canvas "Refine" button (and anything else) seed the composer
+  // with a starter prompt so the user can append their edits.
+  useEffect(() => {
+    const onSet = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as { text?: string };
+      if (typeof detail?.text !== "string") return;
+      setV(detail.text);
+      // Defer focus so the textarea has the new content + we land at end.
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        const end = el.value.length;
+        el.setSelectionRange(end, end);
+      });
+    };
+    window.addEventListener("jai:composer-set", onSet);
+    return () => window.removeEventListener("jai:composer-set", onSet);
+  }, []);
+
   return (
     <div className="max-w-3xl mx-auto w-full px-4 mb-2 select-none">
       {/* Pill capsule input container */}

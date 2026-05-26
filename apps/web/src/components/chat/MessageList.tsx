@@ -3,8 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Sparkles, Copy, Check, ArrowUpRight, Flame, ClipboardList, Network, StickyNote, ChevronRight, Loader2 } from "lucide-react";
+import { Sparkles, Copy, Check, ArrowUpRight, Flame, ClipboardList, Network, StickyNote, ChevronRight, Loader2, Mail, FileText, Code2, ListChecks } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import type { CanvasPayload } from "@/lib/ws";
+import { canvasStore } from "@/lib/canvas";
 
 export type Step = {
   id: string;
@@ -20,6 +22,7 @@ export type Message = {
   text: string;
   agent?: string;
   steps?: Step[];
+  canvas?: CanvasPayload | null;
 };
 
 export function MessageList({
@@ -101,6 +104,11 @@ function Bubble({ m }: { m: Message }) {
             {isUser ? m.text : <Markdown text={m.text} />}
           </div>
 
+          {/* Canvas attachment card: clickable pill that opens the side panel */}
+          {!isUser && m.canvas && (
+            <CanvasCard canvas={m.canvas} messageId={m.id} />
+          )}
+
           {/* Action buttons (Copy, etc.) under the assistant message */}
           {!isUser && (
             <div className="flex items-center gap-1.5 mt-2.5 ml-1.5 md:ml-0 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity duration-200">
@@ -117,6 +125,86 @@ function Bubble({ m }: { m: Message }) {
       </div>
     </div>
   );
+}
+
+function CanvasCard({
+  canvas,
+  messageId,
+}: {
+  canvas: CanvasPayload;
+  messageId: string;
+}) {
+  const Icon = canvasIcon(canvas.kind);
+  const subtitle = canvasSubtitle(canvas);
+  return (
+    <button
+      onClick={() => canvasStore.open(canvas, messageId)}
+      className="mt-3 group w-full max-w-md text-left rounded-2xl bg-[#1e1f20] hover:bg-[#26282a] border border-[#2d2f31] hover:border-[#3d3f41] transition-colors p-3.5 flex items-center gap-3.5"
+    >
+      <div className="shrink-0 flex items-center justify-center w-9 h-9 rounded-xl bg-[var(--accent)]/15 text-[var(--accent)]">
+        <Icon size={16} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[10px] uppercase tracking-wider font-bold text-[var(--accent)]">
+          {canvasLabel(canvas.kind)} · Click to open canvas
+        </div>
+        <div className="text-[14px] font-semibold text-white truncate">
+          {canvas.title}
+        </div>
+        {subtitle && (
+          <div className="text-[12.5px] text-[#8e918f] truncate mt-0.5">
+            {subtitle}
+          </div>
+        )}
+      </div>
+      <ArrowUpRight
+        size={16}
+        className="text-[#8e918f] group-hover:text-white shrink-0"
+      />
+    </button>
+  );
+}
+
+function canvasIcon(kind: CanvasPayload["kind"]) {
+  switch (kind) {
+    case "email_draft":
+      return Mail;
+    case "code":
+      return Code2;
+    case "list":
+      return ListChecks;
+    case "plan":
+      return Sparkles;
+    default:
+      return FileText;
+  }
+}
+
+function canvasLabel(kind: CanvasPayload["kind"]) {
+  switch (kind) {
+    case "email_draft":
+      return "Email draft";
+    case "code":
+      return "Code";
+    case "list":
+      return "List";
+    case "plan":
+      return "Plan";
+    default:
+      return "Document";
+  }
+}
+
+function canvasSubtitle(canvas: CanvasPayload) {
+  const meta = (canvas.metadata || {}) as Record<string, unknown>;
+  if (canvas.kind === "email_draft") {
+    const to = meta.to ? `To ${meta.to}` : null;
+    const subj = meta.subject ? `· ${meta.subject}` : null;
+    return [to, subj].filter(Boolean).join(" ");
+  }
+  // Best-effort: first non-empty line of content.
+  const firstLine = canvas.content?.split("\n").find((l) => l.trim())?.trim();
+  return firstLine ? firstLine.slice(0, 120) : null;
 }
 
 function Markdown({ text }: { text: string }) {

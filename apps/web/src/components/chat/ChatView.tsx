@@ -41,11 +41,14 @@ function saveMessages(msgs: Message[]) {
   }
 }
 
+import type { CanvasPayload } from "@/lib/ws";
+import { canvasStore } from "@/lib/canvas";
+
 type ServerMessageRow = {
   id: string;
   role: string;
   content: string;
-  metadata?: { role_used?: string } | null;
+  metadata?: { role_used?: string; canvas?: CanvasPayload | null } | null;
   created_at: string;
 };
 
@@ -146,6 +149,30 @@ export function ChatView() {
     return () => window.removeEventListener("jai:new-chat", onNew);
   }, []);
 
+  // Canvas action buttons dispatch this event ("Send", "Refine", etc.).
+  // Either fire the prompt straight at chat (immediate) or seed the
+  // composer so the user can append edits before sending.
+  useEffect(() => {
+    const onCanvasAction = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as {
+        actionId: string;
+        prompt: string;
+        immediate?: boolean;
+      };
+      if (!detail?.prompt) return;
+      if (detail.immediate) {
+        send(detail.prompt);
+      } else {
+        // Hand off to the composer so the user can extend the prompt.
+        window.dispatchEvent(
+          new CustomEvent("jai:composer-set", { detail: { text: detail.prompt } }),
+        );
+      }
+    };
+    window.addEventListener("jai:canvas-action", onCanvasAction);
+    return () => window.removeEventListener("jai:canvas-action", onCanvasAction);
+  }, []);
+
   // Supabase Realtime subscription: whenever the API writes a new message
   // row for this user (including server-side responses that happened while
   // the page was refreshing or the WS was dead), append it to the local
@@ -174,7 +201,7 @@ export function ChatView() {
               id: string;
               role: string;
               content: string;
-              metadata?: { role_used?: string } | null;
+              metadata?: { role_used?: string; canvas?: CanvasPayload | null } | null;
             };
             if (row.role !== "user" && row.role !== "assistant") return;
             setMessages((prev) => {
@@ -192,6 +219,7 @@ export function ChatView() {
                   role: row.role as "user" | "assistant",
                   text: row.content,
                   agent: row.metadata?.role_used,
+                  canvas: row.metadata?.canvas ?? null,
                 },
               ];
             });
@@ -267,24 +295,33 @@ export function ChatView() {
               },
             ]);
             break;
-          case "assistant_final":
+          case "assistant_final": {
+            const newId = cryptoId();
             setMessages((prev) => {
               const steps = liveStepsRef.current;
               return [
                 ...prev,
                 {
-                  id: cryptoId(),
+                  id: newId,
                   role: "assistant",
                   text: m.text,
                   agent: m.role_used,
                   steps: steps.length ? steps : undefined,
+                  canvas: m.canvas ?? null,
                 },
               ];
             });
             setLiveSteps([]);
             setThinking(false);
+            // Auto-open the canvas when one arrives — the bubble already
+            // points to it, but opening immediately keeps the workflow
+            // (compose → see → edit → send) tight.
+            if (m.canvas) {
+              canvasStore.open(m.canvas, newId);
+            }
             playerRef.current = new StreamingAudioPlayer("audio/mpeg");
             break;
+          }
           case "audio_chunk":
             playerRef.current?.push(m.b64);
             break;
@@ -498,6 +535,7 @@ function mergeServerMessages(local: Message[], rows: ServerMessageRow[]): Messag
       role: row.role as "user" | "assistant",
       text: row.content,
       agent: row.metadata?.role_used,
+      canvas: row.metadata?.canvas ?? null,
     });
     localKeys.add(key);
   }
