@@ -1,9 +1,21 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Check, Plus, Loader2, ListTodo, StickyNote, ChevronRight } from "lucide-react";
+import {
+  Archive,
+  Check,
+  ChevronRight,
+  ListTodo,
+  Loader2,
+  Pin,
+  PinOff,
+  Plus,
+  StickyNote,
+  Trash2,
+  X,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import { useRealtimeRevalidate } from "@/lib/realtime";
 import { cn } from "@/lib/cn";
@@ -72,6 +84,8 @@ function QuickTasks() {
   const { mutate } = useSWRConfig();
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
 
   const open = (tasks || []).filter((t) => t.status !== "completed").slice(0, 12);
 
@@ -87,7 +101,7 @@ function QuickTasks() {
       setDraft("");
       mutate(`/tasks?list_id=${listId}`);
     } catch {
-      // surface the error via SWR revalidation
+      // Errors propagate via SWR revalidation; no toast needed in the rail.
     } finally {
       setBusy(false);
     }
@@ -95,7 +109,6 @@ function QuickTasks() {
 
   const toggle = async (t: Task) => {
     const next: Task["status"] = t.status === "completed" ? "needsAction" : "completed";
-    // Optimistic update
     mutate(
       `/tasks?list_id=${listId}`,
       (cur: Task[] = []) => cur.map((x) => (x.id === t.id ? { ...x, status: next } : x)),
@@ -105,6 +118,38 @@ function QuickTasks() {
       await api(`/tasks/${t.id}`, {
         method: "PATCH",
         body: JSON.stringify({ status: next }),
+      });
+    } finally {
+      mutate(`/tasks?list_id=${listId}`);
+    }
+  };
+
+  const remove = async (t: Task) => {
+    mutate(
+      `/tasks?list_id=${listId}`,
+      (cur: Task[] = []) => cur.filter((x) => x.id !== t.id),
+      false,
+    );
+    try {
+      await api(`/tasks/${t.id}`, { method: "DELETE" });
+    } finally {
+      mutate(`/tasks?list_id=${listId}`);
+    }
+  };
+
+  const saveRename = async (id: string) => {
+    const title = editTitle.trim();
+    setEditingId(null);
+    if (!title) return;
+    mutate(
+      `/tasks?list_id=${listId}`,
+      (cur: Task[] = []) => cur.map((x) => (x.id === id ? { ...x, title } : x)),
+      false,
+    );
+    try {
+      await api(`/tasks/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
       });
     } finally {
       mutate(`/tasks?list_id=${listId}`);
@@ -157,32 +202,69 @@ function QuickTasks() {
           <Empty>Inbox zero. Nothing on the list.</Empty>
         ) : (
           open.map((t) => (
-            <button
+            <div
               key={t.id}
-              onClick={() => toggle(t)}
-              className="w-full flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-white/5 group text-left"
+              className="group/row flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-white/5"
             >
-              <span
+              <button
+                type="button"
+                onClick={() => toggle(t)}
+                aria-label={t.status === "completed" ? "Mark incomplete" : "Mark complete"}
                 className={cn(
                   "mt-0.5 w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center transition-all",
                   t.status === "completed"
                     ? "bg-emerald-500 border-emerald-500"
-                    : "border-[#5a5d61] group-hover:border-[var(--accent)]",
+                    : "border-[#5a5d61] hover:border-[var(--accent)]",
                 )}
               >
                 {t.status === "completed" && <Check size={9} className="text-white" />}
-              </span>
-              <span
-                className={cn(
-                  "text-[13px] leading-snug flex-1 min-w-0 break-words",
-                  t.status === "completed"
-                    ? "line-through text-[#8e918f]"
-                    : "text-[#e3e3e3]",
-                )}
+              </button>
+
+              {editingId === t.id ? (
+                <input
+                  autoFocus
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  onBlur={() => void saveRename(t.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void saveRename(t.id);
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  className="flex-1 bg-transparent outline-none text-[13px] text-[#e3e3e3] border-b border-[var(--accent)]/40"
+                />
+              ) : (
+                <button
+                  type="button"
+                  onDoubleClick={() => {
+                    setEditingId(t.id);
+                    setEditTitle(t.title);
+                  }}
+                  onClick={() => toggle(t)}
+                  className="text-left flex-1 min-w-0"
+                  title="Double-click to rename"
+                >
+                  <span
+                    className={cn(
+                      "text-[13px] leading-snug break-words",
+                      t.status === "completed"
+                        ? "line-through text-[#8e918f]"
+                        : "text-[#e3e3e3]",
+                    )}
+                  >
+                    {t.title}
+                  </span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void remove(t)}
+                title="Delete task"
+                className="opacity-0 group-hover/row:opacity-100 transition-opacity p-1 rounded hover:bg-white/5 text-[#8e918f] hover:text-red-400"
               >
-                {t.title}
-              </span>
-            </button>
+                <Trash2 size={12} />
+              </button>
+            </div>
           ))
         )}
       </div>
@@ -196,11 +278,11 @@ function QuickNotes() {
   const { mutate } = useSWRConfig();
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const recent = (notes || [])
     .filter((n) => !n.archived)
     .sort((a, b) => {
-      // Pinned first, then by updated_at desc.
       if ((a.pinned ? 1 : 0) !== (b.pinned ? 1 : 0)) {
         return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
       }
@@ -221,6 +303,38 @@ function QuickNotes() {
       mutate("/notes");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const patch = async (id: string, patchBody: Partial<Note>) => {
+    // Optimistic update so the UI reflects pin/archive/edit immediately.
+    mutate(
+      "/notes",
+      (cur: Note[] = []) =>
+        cur.map((n) => (n.id === id ? { ...n, ...patchBody } : n)),
+      false,
+    );
+    try {
+      await api(`/notes/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patchBody),
+      });
+    } finally {
+      mutate("/notes");
+    }
+  };
+
+  const remove = async (id: string) => {
+    setEditingId(null);
+    mutate(
+      "/notes",
+      (cur: Note[] = []) => cur.filter((n) => n.id !== id),
+      false,
+    );
+    try {
+      await api(`/notes/${id}`, { method: "DELETE" });
+    } finally {
+      mutate("/notes");
     }
   };
 
@@ -269,28 +383,263 @@ function QuickNotes() {
         ) : recent.length === 0 ? (
           <Empty>No notes yet.</Empty>
         ) : (
-          recent.map((n) => (
-            <Link
-              key={n.id}
-              href={`/notes#${n.id}`}
-              className="block px-2 py-1.5 rounded-md hover:bg-white/5 group"
-            >
-              {n.title && (
-                <div className="text-[13px] font-medium text-white truncate flex items-center gap-1">
-                  {n.pinned && <span className="text-amber-400 text-[10px]">●</span>}
-                  {n.title}
-                </div>
-              )}
-              {n.body && (
-                <div className="text-[11.5px] text-[#8e918f] line-clamp-2 leading-snug mt-0.5">
-                  {n.body}
-                </div>
-              )}
-            </Link>
-          ))
+          recent.map((n) =>
+            editingId === n.id ? (
+              <NoteEditor
+                key={n.id}
+                note={n}
+                onClose={() => setEditingId(null)}
+                onPatch={(body) => patch(n.id, body)}
+                onDelete={() => remove(n.id)}
+              />
+            ) : (
+              <NoteRow
+                key={n.id}
+                note={n}
+                onOpen={() => setEditingId(n.id)}
+                onTogglePin={() => patch(n.id, { pinned: !n.pinned })}
+                onArchive={() => patch(n.id, { archived: true })}
+                onDelete={() => remove(n.id)}
+              />
+            ),
+          )
         )}
       </div>
     </>
+  );
+}
+
+function NoteRow({
+  note,
+  onOpen,
+  onTogglePin,
+  onArchive,
+  onDelete,
+}: {
+  note: Note;
+  onOpen: () => void;
+  onTogglePin: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="group/note relative rounded-md hover:bg-white/5">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="w-full text-left px-2 py-1.5 block"
+      >
+        {note.title && (
+          <div className="text-[13px] font-medium text-white truncate flex items-center gap-1 pr-16">
+            {note.pinned && <span className="text-amber-400 text-[10px]">●</span>}
+            {note.title}
+          </div>
+        )}
+        {note.body && (
+          <div className="text-[11.5px] text-[#8e918f] line-clamp-2 leading-snug mt-0.5 pr-16">
+            {note.body}
+          </div>
+        )}
+        {!note.title && !note.body && (
+          <div className="text-[11.5px] text-[#5a5d61] italic">Empty note</div>
+        )}
+      </button>
+      <div className="absolute right-1 top-1 flex items-center gap-0.5 opacity-0 group-hover/note:opacity-100 transition-opacity bg-[#181818]/80 backdrop-blur-sm rounded-md">
+        <IconBtn
+          icon={note.pinned ? PinOff : Pin}
+          title={note.pinned ? "Unpin" : "Pin"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePin();
+          }}
+          highlight={note.pinned}
+        />
+        <IconBtn
+          icon={Archive}
+          title="Archive"
+          onClick={(e) => {
+            e.stopPropagation();
+            onArchive();
+          }}
+        />
+        <IconBtn
+          icon={Trash2}
+          title="Delete"
+          danger
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function NoteEditor({
+  note,
+  onClose,
+  onPatch,
+  onDelete,
+}: {
+  note: Note;
+  onClose: () => void;
+  onPatch: (body: Partial<Note>) => Promise<void> | void;
+  onDelete: () => void;
+}) {
+  const [title, setTitle] = useState(note.title || "");
+  const [body, setBody] = useState(note.body || "");
+  const [pinned, setPinned] = useState(!!note.pinned);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dirtyRef = useRef(false);
+  const savingRef = useRef<NodeJS.Timeout | null>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the body textarea so the user sees the full note while
+  // typing, mirroring Keep's behaviour.
+  useEffect(() => {
+    const ta = bodyRef.current;
+    if (!ta) return;
+    ta.style.height = "0px";
+    ta.style.height = `${Math.min(ta.scrollHeight, 320)}px`;
+  }, [body]);
+
+  // Click outside collapses the editor (and flushes a save if dirty).
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(e.target as Node)) {
+        flush();
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const queueSave = (next: Partial<Note>) => {
+    dirtyRef.current = true;
+    if (savingRef.current) clearTimeout(savingRef.current);
+    savingRef.current = setTimeout(() => {
+      void onPatch(next);
+      dirtyRef.current = false;
+    }, 600);
+  };
+
+  const flush = () => {
+    if (!dirtyRef.current) return;
+    if (savingRef.current) clearTimeout(savingRef.current);
+    void onPatch({ title: title || null, body: body || null });
+    dirtyRef.current = false;
+  };
+
+  const togglePin = () => {
+    const next = !pinned;
+    setPinned(next);
+    void onPatch({ pinned: next });
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className="rounded-lg bg-[#1f2021] border border-[#3b3d3f] shadow-lg shadow-black/30 p-2"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          flush();
+          onClose();
+        }
+      }}
+    >
+      <input
+        value={title}
+        onChange={(e) => {
+          setTitle(e.target.value);
+          queueSave({ title: e.target.value || null, body: body || null });
+        }}
+        placeholder="Title"
+        className="w-full bg-transparent outline-none text-[13px] font-medium text-white placeholder-[#5a5d61] pb-1"
+      />
+      <textarea
+        ref={bodyRef}
+        value={body}
+        autoFocus={!title}
+        onChange={(e) => {
+          setBody(e.target.value);
+          queueSave({ title: title || null, body: e.target.value || null });
+        }}
+        placeholder="Take a note…"
+        rows={3}
+        className="w-full bg-transparent outline-none text-[12.5px] text-[#e3e3e3] placeholder-[#5a5d61] resize-none leading-snug"
+      />
+      <div className="flex items-center gap-0.5 pt-1 -mx-1">
+        <IconBtn
+          icon={pinned ? PinOff : Pin}
+          title={pinned ? "Unpin" : "Pin"}
+          onClick={togglePin}
+          highlight={pinned}
+        />
+        <IconBtn
+          icon={Archive}
+          title="Archive"
+          onClick={() => {
+            flush();
+            void onPatch({ archived: true });
+            onClose();
+          }}
+        />
+        <IconBtn
+          icon={Trash2}
+          title="Delete"
+          danger
+          onClick={onDelete}
+        />
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => {
+            flush();
+            onClose();
+          }}
+          className="text-[11.5px] px-2 py-1 rounded text-[#8e918f] hover:text-white hover:bg-white/5 inline-flex items-center gap-1"
+          title="Close (esc)"
+        >
+          <X size={11} /> Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function IconBtn({
+  icon: Icon,
+  title,
+  onClick,
+  highlight,
+  danger,
+}: {
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  title: string;
+  onClick: (e: React.MouseEvent) => void;
+  highlight?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "p-1.5 rounded transition-colors",
+        highlight
+          ? "text-amber-300 hover:bg-amber-400/10"
+          : danger
+          ? "text-[#8e918f] hover:text-red-400 hover:bg-red-500/10"
+          : "text-[#8e918f] hover:text-white hover:bg-white/5",
+      )}
+    >
+      <Icon size={13} />
+    </button>
   );
 }
 
