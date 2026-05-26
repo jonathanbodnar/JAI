@@ -17,6 +17,7 @@ from .nodes.ingest import ingest
 from .nodes.orchestrator import orchestrator
 from .nodes.persist_memory import make_persist
 from .nodes.reflect import reflect
+from .nodes.respond import respond
 from .nodes.retrieve_memory import make_retrieve
 from .nodes.skill_executor import skill_executor
 from .nodes.strategize import strategize
@@ -37,14 +38,18 @@ class JaiGraph:
 
 def _route_after_orchestrator(state: JaiState) -> str:
     r = state.get("route")
-    if r in ("respond", "ask"):
+    # "ask" is fully drafted by the orchestrator (one-line clarifier),
+    # so it skips straight to persist. Everything else goes to the
+    # appropriate specialist node before persisting.
+    if r == "ask":
         return "persist"
     return {
+        "respond": "respond",
         "reflect": "reflect",
         "strategize": "strategize",
         "tool": "tool",
         "skill": "skill",
-    }.get(r, "persist")
+    }.get(r, "respond")
 
 
 def _route_after_fast_intent(state: JaiState) -> str:
@@ -73,6 +78,7 @@ async def build_graph(settings: Settings) -> JaiGraph:
     g.add_node("fast_intent", fast_intent)
     g.add_node("retrieve", retrieve)
     g.add_node("orchestrator", orchestrator)
+    g.add_node("respond", respond)
     g.add_node("reflect", reflect)
     g.add_node("strategize", strategize)
     g.add_node("tool", tool_router)
@@ -93,12 +99,14 @@ async def build_graph(settings: Settings) -> JaiGraph:
         _route_after_orchestrator,
         {
             "persist": "persist",
+            "respond": "respond",
             "reflect": "reflect",
             "strategize": "strategize",
             "tool": "tool",
             "skill": "skill",
         },
     )
+    g.add_edge("respond", "persist")
     g.add_edge("reflect", "persist")
     g.add_edge("strategize", "persist")
     g.add_edge("tool", "persist")

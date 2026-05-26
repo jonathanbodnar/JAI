@@ -24,11 +24,15 @@ class Settings(BaseSettings):
     # snappy. Fast Gemini / Claude Haiku-class slugs on OpenRouter are ~5x
     # faster than Qwen Max for routing-style structured output. Use
     # `jai_model_orchestrator` to override if you want a heavier brain.
+    # Orchestrator + fast routing stays on Gemini Flash so routing is cheap
+    # and snappy. The actual JAI voice (responses, reflection) lives on Kimi
+    # K2.6 — it carries the long-form personality the user trained against.
     jai_model_orchestrator: str = "google/gemini-2.0-flash-001"
+    jai_model_fast: str = "google/gemini-2.0-flash-001"
+    jai_model_respond: str = "moonshotai/kimi-k2.6"
     jai_model_reflection: str = "moonshotai/kimi-k2.6"
     jai_model_strategy: str = "deepseek/deepseek-v4-pro"
     jai_model_skill_builder: str = "qwen/qwen3.7-max"
-    jai_model_fast: str = "google/gemini-2.0-flash-001"
     jai_model_embed: str = "openai/text-embedding-3-large"
 
     # --- Speech ---

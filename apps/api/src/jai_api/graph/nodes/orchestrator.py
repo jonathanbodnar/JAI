@@ -1,8 +1,12 @@
-"""The orchestrator decides what kind of turn this is and drafts a response.
+"""The orchestrator decides what kind of turn this is.
 
 Uses structured output so we can route deterministically. The orchestrator
-also produces a short draft for the 'respond' and 'ask' routes; for the
-delegated routes (reflect/strategize/tool/skill), it just routes.
+ONLY routes — actual drafting lives downstream:
+  - respond  → respond.py (Kimi K2.6, the JAI voice)
+  - reflect  → reflect.py (Kimi K2.6)
+  - strategize → strategize.py (DeepSeek)
+  - tool/skill → tool_router / skill_executor
+  - ask      → a one-line clarifying question is fine to draft here (Flash)
 """
 
 from __future__ import annotations
@@ -23,7 +27,10 @@ log = structlog.get_logger()
 class OrchestratorDecision(BaseModel):
     route: Literal["respond", "reflect", "strategize", "tool", "skill", "ask"]
     reason: str = Field(description="One sentence why this route")
-    draft: str | None = Field(default=None, description="Response draft for respond/ask routes")
+    draft: str | None = Field(
+        default=None,
+        description="ONLY populate when route is 'ask' — a single-sentence clarifying question. NEVER populate for 'respond'; the responder node handles that.",
+    )
 
 
 def _format_memory(state: JaiState) -> str:
@@ -88,7 +95,10 @@ async def orchestrator(state: JaiState) -> dict:
         "route_reason": decision.reason,
         "role_used": "orchestrator",
     }
-    if decision.route in ("respond", "ask") and decision.draft:
+    # Only "ask" drafts a one-liner here. "respond" always goes to the
+    # dedicated responder node so the JAI voice is consistent (Kimi),
+    # not whatever Flash happens to draft.
+    if decision.route == "ask" and decision.draft:
         out["final_text"] = decision.draft
         out["messages"] = [AIMessage(content=decision.draft)]
     return out

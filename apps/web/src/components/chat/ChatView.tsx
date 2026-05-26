@@ -225,12 +225,17 @@ export function ChatView() {
           <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#7c5cff] via-[#9b76ff] to-[#f43f5e] shadow-[0_0_15px_rgba(124,92,255,0.3)] shrink-0">
             <BrainCircuit size={18} className="text-white" />
           </div>
-          {/* Model selector mimic */}
+          {/* Multi-model stack — voice is Kimi K2.6, routing is Flash, strategy
+              is DeepSeek, skills are Qwen. The badge says "Multi" so we don't
+              lie about which model wrote any given turn. */}
           <div className="flex flex-col">
             <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-1.5">
               JAI
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] font-bold text-zinc-300 border border-zinc-700/50 uppercase">
-                Flash 2.0
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] font-bold text-zinc-300 border border-zinc-700/50 uppercase"
+                title="Routing on Gemini Flash · Voice on Kimi K2.6 · Strategy on DeepSeek · Skills on Qwen"
+              >
+                Multi
               </span>
             </h1>
           </div>

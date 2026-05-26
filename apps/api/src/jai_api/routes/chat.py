@@ -232,7 +232,13 @@ def _summarize_delta(node_name: str, delta) -> str | None:
             return None
         if node_name == "orchestrator":
             route = delta.get("route")
-            return f"Decided route → {route}" if route else None
+            return f"Route → {route}" if route else None
+        if node_name == "respond":
+            return "Voice: Kimi K2.6"
+        if node_name == "reflect":
+            return "Voice: Kimi K2.6"
+        if node_name == "strategize":
+            return "Voice: DeepSeek V4 Pro"
         if node_name == "skill":
             sk = delta.get("skill_name") or delta.get("skill_id")
             return f"Ran {sk}" if sk else None
@@ -295,9 +301,10 @@ _STEP_LABELS = {
     "ingest": ("Reading your message", "Parsing intent & context"),
     "fast_intent": ("Checking quick actions", "Matching against built-in patterns"),
     "retrieve": ("Recalling memory", "Pulling identity facts, embeddings, graph"),
-    "orchestrator": ("Thinking", "Routing the response through the planner"),
-    "reflect": ("Reflecting", "Reviewing the answer for accuracy"),
-    "strategize": ("Strategizing", "Drafting a deeper plan"),
+    "orchestrator": ("Routing", "Picking which model handles this turn"),
+    "respond": ("Drafting reply", "Kimi K2.6 — the JAI voice"),
+    "reflect": ("Reflecting", "Kimi K2.6 — pattern matching across your history"),
+    "strategize": ("Strategizing", "DeepSeek V4 Pro — option trade-offs"),
     "tool": ("Calling a tool", "Routing to a connected integration"),
     "skill": ("Running a skill", "Executing sandboxed code"),
     "persist": ("Saving to memory", "Selectively writing durable facts"),

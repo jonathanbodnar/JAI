@@ -12,6 +12,7 @@ from .openrouter import openrouter_chat
 
 class Role(StrEnum):
     ORCHESTRATOR = "orchestrator"
+    RESPOND = "respond"
     REFLECTION = "reflection"
     STRATEGY = "strategy"
     SKILL_BUILDER = "skill_builder"
@@ -22,6 +23,7 @@ def model_for(role: Role, *, settings: Settings | None = None) -> str:
     s = settings or get_settings()
     return {
         Role.ORCHESTRATOR: s.jai_model_orchestrator,
+        Role.RESPOND: s.jai_model_respond,
         Role.REFLECTION: s.jai_model_reflection,
         Role.STRATEGY: s.jai_model_strategy,
         Role.SKILL_BUILDER: s.jai_model_skill_builder,
