@@ -121,7 +121,8 @@ async def _execute(
     # Supabase and API without the user having to store them manually.
     platform_env = _platform_env(user_id)
     sources_env = await _data_sources_env(user_id)
-    merged_env = {**platform_env, **sources_env, **creds}  # user creds win on collision
+    accounts_env = await _connected_accounts_env(user_id)
+    merged_env = {**platform_env, **sources_env, **accounts_env, **creds}  # user creds win on collision
 
     sandbox = SandboxClient()
     try:
@@ -179,7 +180,13 @@ async def _execute(
     return SkillOutcome(
         final_text=text,
         skill_id=skill["id"],
-        raw={**(raw or {}), "skill_name": skill.get("title")},
+        # `skill_executor` reads `raw.status` + `raw.result` to decide
+        # whether to synthesize through Kimi vs. fall back to `text`.
+        raw={
+            **(raw or {}),
+            "skill_name": skill.get("title"),
+            "first_run": first_run,
+        },
     )
 
 
@@ -191,6 +198,73 @@ def _credential_ask(missing: list[str], explanation: str | None = None) -> str:
         f"To do that, I need a few things from you: {keys}. "
         "Reply with `key=value` (one per line), or set them in Settings → Credentials."
     )
+
+
+async def _connected_accounts_env(user_id: str) -> dict[str, str]:
+    """Inject ALL connected OAuth accounts as JSON env vars.
+
+    The legacy `GMAIL_OAUTH_JSON` (default account only) still gets
+    populated through `skill_credentials`, but skills that say things
+    like "read all my emails" need every connected mailbox. We expose:
+
+      GMAIL_ACCOUNTS_JSON       — list of {email,label,token_json,is_default}
+      CALENDAR_ACCOUNTS_JSON
+      DRIVE_ACCOUNTS_JSON
+
+    Each `token_json` is the same shape the existing Gmail recipe
+    consumes (token/refresh_token/client_id/client_secret/etc.) so a
+    skill can iterate and call `Credentials.from_authorized_user_info`
+    per account.
+    """
+    import json as _json
+    from ..db import supabase_admin
+    from .credentials import decrypt
+
+    env: dict[str, str] = {}
+    try:
+        sb = supabase_admin()
+        rows = (
+            sb.table("connected_accounts")
+            .select(
+                "service, account_email, label, value_encrypted, is_default, scopes"
+            )
+            .eq("user_id", user_id)
+            .eq("provider", "google")
+            .eq("is_active", True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        log.warning("connected_accounts.fetch_failed", error=str(e))
+        return env
+
+    by_service: dict[str, list[dict]] = {}
+    for r in rows:
+        try:
+            token_str = decrypt(r["value_encrypted"].encode("ascii"))
+            token_obj = _json.loads(token_str)
+        except Exception as e:
+            log.warning(
+                "connected_accounts.decrypt_failed",
+                service=r.get("service"),
+                email=r.get("account_email"),
+                error=str(e),
+            )
+            continue
+        by_service.setdefault(r["service"], []).append(
+            {
+                "email": r["account_email"],
+                "label": r.get("label") or r["account_email"],
+                "token_json": token_obj,
+                "is_default": bool(r.get("is_default")),
+                "scopes": r.get("scopes") or [],
+            }
+        )
+
+    for service, accounts in by_service.items():
+        env[f"{service.upper()}_ACCOUNTS_JSON"] = _json.dumps(accounts)
+    return env
 
 
 async def _data_sources_env(user_id: str) -> dict[str, str]:

@@ -181,11 +181,20 @@ Constraints:
   Node 20 + fetch + tsx are pre-installed for TS.
 - Credentials are injected as env vars matching the keys you declared.
 
-GOOGLE OAUTH RECIPE (Gmail / Calendar / Drive):
-The credential `GMAIL_OAUTH_JSON` / `CALENDAR_OAUTH_JSON` / `DRIVE_OAUTH_JSON`
-is a JSON blob containing {token, refresh_token, token_uri, client_id,
-client_secret, scopes, expiry}. ALWAYS write Gmail-style skills like this
-so token refresh works automatically:
+GOOGLE OAUTH (Gmail / Calendar / Drive) — IMPORTANT, MULTI-ACCOUNT:
+
+The user may have connected MULTIPLE Google accounts (e.g. work + personal
+Gmail). Two env vars are injected:
+
+1. `<SERVICE>_OAUTH_JSON` — the *default* account only. Use this only
+   when the user clearly meant a single account.
+2. `<SERVICE>_ACCOUNTS_JSON` — JSON array of EVERY connected account:
+   `[{"email":"a@x.com","label":"Work","token_json":{...},"is_default":true,"scopes":[...]}, ...]`
+
+For requests like "read my emails", "summarize today's mail", "show all
+events", etc. ALWAYS iterate over `<SERVICE>_ACCOUNTS_JSON` so the user
+sees results from every mailbox. Single-account flow is the exception,
+not the default.
 
 ```python
 import os, json
@@ -193,21 +202,47 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-info = json.loads(os.environ["GMAIL_OAUTH_JSON"])
-# `from_authorized_user_info` expects "token" not "access_token":
-info["token"] = info.get("token") or info.get("access_token")
-creds = Credentials.from_authorized_user_info(info)
-if not creds.valid:
-    creds.refresh(Request())  # refresh_token + client_secret → new access_token
+def _service(token_json, api, version):
+    info = dict(token_json)
+    # `from_authorized_user_info` expects "token" not "access_token":
+    info["token"] = info.get("token") or info.get("access_token")
+    creds = Credentials.from_authorized_user_info(info)
+    if not creds.valid:
+        creds.refresh(Request())  # uses refresh_token + client_secret
+    return build(api, version, credentials=creds, cache_discovery=False)
 
-service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-# ... do work ...
-print(json.dumps({"status": "ok", "result": ...}))
+accounts = json.loads(os.environ.get("GMAIL_ACCOUNTS_JSON") or "[]")
+if not accounts:
+    # Fall back to single-account if multi-account env var is empty.
+    accounts = [{"email": "default", "token_json": json.loads(os.environ["GMAIL_OAUTH_JSON"])}]
+
+all_emails = []
+for a in accounts:
+    svc = _service(a["token_json"], "gmail", "v1")
+    listing = svc.users().messages().list(userId="me", maxResults=10, labelIds=["INBOX"]).execute()
+    for m in listing.get("messages", [])[:10]:
+        full = svc.users().messages().get(userId="me", id=m["id"], format="metadata",
+            metadataHeaders=["From","Subject","Date"]).execute()
+        headers = {h["name"]: h["value"] for h in full["payload"]["headers"]}
+        all_emails.append({
+            "account": a["email"],
+            "from": headers.get("From"),
+            "subject": headers.get("Subject"),
+            "date": headers.get("Date"),
+            "snippet": full.get("snippet"),
+        })
+
+print(json.dumps({"status": "ok", "result": {
+    "total": len(all_emails),
+    "by_account": {a["email"]: sum(1 for e in all_emails if e["account"] == a["email"]) for a in accounts},
+    "emails": all_emails,
+}}))
 ```
 
-NEVER skip the `creds.refresh(Request())` step — Google access tokens
-expire every 60 minutes, and the sandbox container has zero state
-between runs."""
+NEVER skip `creds.refresh(Request())` — access tokens expire every 60
+minutes and the sandbox has zero state between runs. NEVER include
+junk fields like full message IDs, thread IDs, or unsubscribe links in
+the result — they make the downstream synthesis noisier."""
 
 
 SUMMARIZE_DAY_SYSTEM = """Summarize the user's day in <=200 words.
