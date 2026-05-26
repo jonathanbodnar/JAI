@@ -67,11 +67,16 @@ async def build_skill(
     # silently runs without credentials and blows up with a KeyError.
     extracted = _extract_env_keys(draft.source or "", draft.language or "python")
     declared = set(draft.uses_credentials or [])
+
+    def _is_platform(key: str) -> bool:
+        if key in _PLATFORM_KEYS:
+            return True
+        return any(key.startswith(p) for p in _PLATFORM_PREFIXES)
+
     # Drop platform / data-source vars — those are auto-injected and don't
     # need to be on the skill's required list (which gates execution
     # against `skill_credentials`).
-    platform_keys = _PLATFORM_KEYS | {k for k in extracted if k.startswith(("SUPABASE_", "JAI_"))}
-    union = (declared | extracted) - platform_keys
+    union = {k for k in (declared | extracted) if not _is_platform(k)}
     draft.uses_credentials = sorted(union)
 
     log.info(
@@ -84,14 +89,31 @@ async def build_skill(
     return draft
 
 
-# Env vars that JAI injects automatically and that we never need to gate on.
+# Env vars that JAI injects automatically and that we never need to gate
+# on. If we DID gate on them they'd show up as "missing credentials" in
+# the chat and the user would be asked to provide a value for an env
+# var they don't even know exists.
 _PLATFORM_KEYS = {
+    # JAI's own Supabase (auto-injected from app config)
     "JAI_SUPABASE_URL",
     "JAI_SUPABASE_KEY",
     "JAI_USER_ID",
     "JAI_BACKEND_URL",
+    # External Supabase projects connected via Settings → Data Sources
     "SUPABASE_PROJECTS_JSON",
+    # Multi-account OAuth blobs (auto-injected from connected_accounts)
+    "GMAIL_ACCOUNTS_JSON",
+    "CALENDAR_ACCOUNTS_JSON",
+    "DRIVE_ACCOUNTS_JSON",
 }
+
+
+# Env vars that look like prefixed convenience vars — also auto-injected
+# and should never appear on the required list.
+_PLATFORM_PREFIXES = (
+    "SUPABASE_",   # per-source data project vars (SUPABASE_SHOUTOUT_URL, etc.)
+    "JAI_",
+)
 
 
 def _extract_env_keys(source: str, language: str) -> set[str]:

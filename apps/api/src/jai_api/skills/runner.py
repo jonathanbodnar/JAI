@@ -68,9 +68,20 @@ async def run_intent(
         goal=intent,
         available_credentials=creds_have,
     )
-    if draft.need_credentials:
-        ask = _credential_ask(draft.need_credentials, draft.explanation)
-        return SkillOutcome(final_text=ask, needs_credentials=draft.need_credentials)
+    # Filter out platform vars from need_credentials — the LLM sometimes
+    # lists GMAIL_ACCOUNTS_JSON / SUPABASE_PROJECTS_JSON as missing even
+    # though we auto-inject those. Treating them as required would dead-
+    # end the user with "Reply with key=value" for a value they can't
+    # provide.
+    from .builder import _PLATFORM_KEYS, _PLATFORM_PREFIXES
+    real_needs = [
+        k for k in (draft.need_credentials or [])
+        if k not in _PLATFORM_KEYS and not any(k.startswith(p) for p in _PLATFORM_PREFIXES)
+    ]
+    draft.need_credentials = real_needs
+    if real_needs:
+        ask = _credential_ask(real_needs, draft.explanation)
+        return SkillOutcome(final_text=ask, needs_credentials=real_needs)
 
     if not (draft.language and draft.source and draft.title and draft.description):
         return SkillOutcome(
@@ -107,6 +118,14 @@ async def _execute(
     first_run: bool = False,
 ) -> SkillOutcome:
     required = skill.get("required_credentials") or []
+    # Strip platform vars defensively — some older skills saved them on
+    # required_credentials before we filtered the builder output, and
+    # without this they'd permanently 404 with a credential ask.
+    from .builder import _PLATFORM_KEYS, _PLATFORM_PREFIXES
+    required = [
+        k for k in required
+        if k not in _PLATFORM_KEYS and not any(k.startswith(p) for p in _PLATFORM_PREFIXES)
+    ]
     missing = await registry.missing_credentials(user_id=user_id, required=required)
     if missing:
         return SkillOutcome(
@@ -343,10 +362,69 @@ def _platform_env(user_id: str) -> dict[str, str]:
 
 
 async def _user_credential_keys(user_id: str) -> list[str]:
+    """Every credential-shaped env var that will be available at run time.
+
+    The LLM uses this list to decide whether it can complete the task or
+    needs to ask the user for something. It MUST include the auto-
+    injected platform / OAuth / data-source vars or the LLM will treat
+    them as missing and JAI will ask the user to type in a value for a
+    var they don't even know about.
+    """
     from ..db import supabase_admin
     sb = supabase_admin()
-    res = sb.table("skill_credentials").select("key").eq("user_id", user_id).execute()
-    return [r["key"] for r in (res.data or [])]
+
+    keys: list[str] = []
+
+    # 1) User-supplied creds in skill_credentials.
+    try:
+        res = sb.table("skill_credentials").select("key").eq("user_id", user_id).execute()
+        keys.extend(r["key"] for r in (res.data or []))
+    except Exception as e:
+        log.warning("creds.list_failed", error=str(e))
+
+    # 2) JAI platform vars (always injected).
+    keys.extend(["JAI_SUPABASE_URL", "JAI_SUPABASE_KEY", "JAI_USER_ID", "JAI_BACKEND_URL"])
+
+    # 3) External Supabase data sources.
+    try:
+        rows = (
+            sb.table("data_sources")
+            .select("slug")
+            .eq("user_id", user_id)
+            .eq("kind", "supabase")
+            .eq("is_active", True)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            keys.append("SUPABASE_PROJECTS_JSON")
+            for r in rows:
+                slug = (r["slug"] or "").upper()
+                if slug:
+                    keys.append(f"SUPABASE_{slug}_URL")
+                    keys.append(f"SUPABASE_{slug}_KEY")
+    except Exception as e:
+        log.warning("creds.data_sources_list_failed", error=str(e))
+
+    # 4) Connected OAuth accounts (multi-account env vars).
+    try:
+        accts = (
+            sb.table("connected_accounts")
+            .select("service")
+            .eq("user_id", user_id)
+            .eq("provider", "google")
+            .eq("is_active", True)
+            .execute()
+            .data
+            or []
+        )
+        for svc in {a["service"] for a in accts}:
+            keys.append(f"{svc.upper()}_ACCOUNTS_JSON")
+    except Exception as e:
+        log.warning("creds.accounts_list_failed", error=str(e))
+
+    return sorted(set(keys))
 
 
 def _preview(result) -> str:

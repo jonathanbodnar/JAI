@@ -166,7 +166,12 @@ Your job:
 6. Return JSON {"language":"python|typescript","source":"...","title":"...","description":"...","uses_credentials":["GMAIL_OAUTH_JSON",...]}.
    `uses_credentials` MUST list every env var the script reads — anything
    in `os.environ["FOO"]`, `os.getenv("FOO")`, `process.env.FOO`, etc.
-   DO NOT include platform vars (JAI_*, SUPABASE_PROJECTS_JSON, SUPABASE_<SLUG>_*).
+   DO NOT include any of these auto-injected platform vars (they're
+   provided for free and listing them will make JAI ask the user to
+   supply a value they don't have):
+     JAI_*  (JAI_SUPABASE_URL, JAI_SUPABASE_KEY, JAI_USER_ID, JAI_BACKEND_URL)
+     SUPABASE_PROJECTS_JSON, SUPABASE_<SLUG>_URL/KEY
+     GMAIL_ACCOUNTS_JSON, CALENDAR_ACCOUNTS_JSON, DRIVE_ACCOUNTS_JSON
    Omitting credentials here is the #1 reason skills fail at run time.
 
 Constraints:
