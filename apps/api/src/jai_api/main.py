@@ -19,6 +19,7 @@ from .routes import (
     context_ingest,
     data_sources,
     jobs,
+    kpis,
     mcp_connections,
     notes,
     oauth,
@@ -84,6 +85,7 @@ app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
 app.include_router(context_ingest.router, prefix="/context", tags=["context"])
 app.include_router(schedule.router, prefix="/schedule", tags=["schedule"])
 app.include_router(data_sources.router, prefix="/datasources", tags=["datasources"])
+app.include_router(kpis.router, prefix="/kpis", tags=["kpis"])
 
 
 @app.get("/health")

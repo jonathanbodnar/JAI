@@ -114,7 +114,45 @@ print(json.dumps({"status":"ok","result":{"tasks":tasks, "skills":skills}}))
 ```
 Use this whenever the user asks about their projects, progress, activity, tasks, or any JAI data.
 Tables available: tasks, task_lists, notes, documents, messages, skills, skill_runs,
-                  scheduled_actions, connected_accounts, audit_log, data_sources
+                  scheduled_actions, connected_accounts, audit_log, data_sources, kpis
+
+LIVING KPIs (the pills at the top of the JAI header):
+The `kpis` table holds `(key, label, value, previous, format, unit, history, ...)`.
+Any time a skill computes a number worth pinning to the header
+(MRR, active users, open deals, weight, sleep score, build minutes,
+anything), upsert it directly via Supabase REST. Use the slug `key`
+to make it idempotent across runs:
+
+```python
+from datetime import datetime, timezone
+import os, json, httpx
+
+base = os.environ["JAI_SUPABASE_URL"].rstrip("/") + "/rest/v1"
+auth = {
+    "apikey": os.environ["JAI_SUPABASE_KEY"],
+    "Authorization": f"Bearer {os.environ['JAI_SUPABASE_KEY']}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
+uid = os.environ["JAI_USER_ID"]
+now = datetime.now(timezone.utc).isoformat()
+
+existing = httpx.get(f"{base}/kpis?user_id=eq.{uid}&key=eq.mrr",
+                     headers=auth, timeout=15.0).json()
+if existing:
+    cur = existing[0]
+    httpx.patch(f"{base}/kpis?id=eq.{cur['id']}",
+        headers=auth, json={"value":"$48,250","previous":cur["value"],
+                            "history":(cur.get("history") or [])[-29:] + [{"value":"$48,250","at":now}],
+                            "last_updated_at":now}, timeout=15.0).raise_for_status()
+else:
+    httpx.post(f"{base}/kpis", headers=auth, json={
+        "user_id": uid, "key":"mrr", "label":"MRR", "value":"$48,250",
+        "format":"currency", "source":"stripe.summary",
+        "history":[{"value":"$48,250","at":now}], "last_updated_at":now,
+    }, timeout=15.0).raise_for_status()
+```
+`format` is one of raw/number/currency/percent/duration.
 
 QUERYING A USER-CONNECTED EXTERNAL PROJECT (e.g. Shoutout):
 ```python

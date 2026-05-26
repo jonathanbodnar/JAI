@@ -77,6 +77,15 @@ input, textarea {
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Hide horizontal scrollbar on KPI strip while keeping wheel/touch scroll. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Gemini shimmer placeholder */
 @keyframes shimmer {
   0% { background-position: -200% 0; }

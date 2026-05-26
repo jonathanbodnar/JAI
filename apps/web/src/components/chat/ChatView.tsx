@@ -5,9 +5,10 @@ import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
 import { api } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
 import Link from "next/link";
-import { Settings, Trash2, BrainCircuit } from "lucide-react";
+import { Settings, Trash2 } from "lucide-react";
 import { MessageList, type Message, type Step } from "./MessageList";
 import { Composer } from "./Composer";
+import { LivingKPIs } from "./LivingKPIs";
 import { cn } from "@/lib/cn";
 
 const CHAT_KEY = "jai.chat.messages.v1";
@@ -350,28 +351,9 @@ export function ChatView() {
 
   return (
     <div className="flex flex-col h-full bg-[#131314] select-none relative">
-      {/* Top Header */}
-      <header className="header-safe-pt px-6 pb-4 flex items-center justify-between border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20">
-        <div className="flex items-center gap-3">
-          {/* Logo */}
-          <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#7c5cff] via-[#9b76ff] to-[#f43f5e] shadow-[0_0_15px_rgba(124,92,255,0.3)] shrink-0">
-            <BrainCircuit size={18} className="text-white" />
-          </div>
-          {/* Multi-model stack — voice is Kimi K2.6, routing is Flash, strategy
-              is DeepSeek, skills are Qwen. The badge says "Multi" so we don't
-              lie about which model wrote any given turn. */}
-          <div className="flex flex-col">
-            <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-1.5">
-              JAI
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] font-bold text-zinc-300 border border-zinc-700/50 uppercase"
-                title="Routing on Gemini Flash · Voice on Kimi K2.6 · Strategy on DeepSeek · Skills on Qwen"
-              >
-                Multi
-              </span>
-            </h1>
-          </div>
-        </div>
+      {/* Top Header — JAI mark + living KPI pills */}
+      <header className="header-safe-pt px-4 md:px-6 pb-4 flex items-center justify-between gap-3 border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20">
+        <LivingKPIs />
 
         {/* Action Controls */}
         <div className="flex items-center gap-4 text-xs text-[#8e918f]">
