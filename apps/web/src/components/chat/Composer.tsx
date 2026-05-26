@@ -82,7 +82,7 @@ export function Composer({
     <div className="max-w-3xl mx-auto w-full px-4 mb-2 select-none">
       {/* Pill capsule input container */}
       <div className={cn(
-        "flex items-end gap-2.5 bg-[#1e1f20] rounded-[28px] px-4.5 py-3 border border-[#2d2f31] focus-within:border-zinc-700 transition-all duration-200 shadow-md",
+        "flex items-end gap-2.5 bg-[#1e1f20] rounded-[28px] px-5 py-3.5 border border-[#2d2f31] focus-within:border-zinc-700 transition-all duration-200 shadow-md",
         recording && "border-[var(--accent)]/50 ring-2 ring-[var(--accent)]/20"
       )}>
         {/* Text Input */}
@@ -95,7 +95,6 @@ export function Composer({
           disabled={disabled || recording}
           placeholder={recording ? "Listening... Release to send" : "Message JAI..."}
           className="flex-1 bg-transparent resize-none outline-none text-[15px] max-h-32 text-[#e3e3e3] placeholder-[#8e918f] py-1 leading-relaxed self-center"
-          style={{ height: "auto" }}
         />
 
         {/* Action button pack */}

@@ -42,7 +42,7 @@ export function Sidebar() {
   return (
     <aside className="hidden md:flex flex-col w-64 bg-[#131314] border-r border-[#2d2f31] h-full shrink-0 select-none">
       {/* Brand Logo */}
-      <div className="p-6 flex items-center gap-2.5">
+      <div className="pt-8 pb-6 px-6 flex items-center gap-2.5">
         <div className="relative flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#7c5cff] to-[#f43f5e] shadow-[0_0_20px_rgba(124,92,255,0.4)] animate-pulse">
           <Brain size={18} className="text-white" />
         </div>

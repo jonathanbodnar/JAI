@@ -57,7 +57,8 @@ _LEAD_RE = re.compile(
     r"please\s+|pls\s+|"
     r"i\s+(?:need|want|would\s+like)\s+(?:you\s+)?to\s+|"
     r"go\s+ahead\s+and\s+|"
-    r"(?:would|can)\s+you\s+mind(?:\s+if\s+i\s+ask\s+you)?\s+to\s+"
+    r"(?:would|can)\s+you\s+mind(?:\s+if\s+i\s+ask\s+you)?\s+to\s+|"
+    r"(?:please\s+)?(?:update|change|prune|edit)\s+(?:my\s+)?(?:context|memory)\s*(?:by|to)?\s*[,\-:!.]*\s*"
     r")",
     re.IGNORECASE,
 )
@@ -82,9 +83,9 @@ _TASK_RE = re.compile(
 # of the skill builder when they're just trying to prune mistakes.
 _FORGET_RE = re.compile(
     r"^\s*(?:"
-    r"(?:please\s+)?(?:remove|delete|forget|drop|wipe|clear|erase|"
-    r"strike|take\s+out|get\s+rid\s+of)\s+(?P<body>.+?)"
-    r"\s+(?:from\s+)?(?:my\s+)?(?:context|memory|graph|brain|jai|knowledge|notes?)"
+    r"(?:(?:please\s+)?(?:remove|delete|forget|drop|wipe|clear|erase|strike|take\s+out|get\s+rid\s+of)\s+(?P<body1>.+?)\s+(?:from\s+)?(?:my\s+)?(?:context|memory|graph|brain|jai|knowledge|notes?))|"
+    r"(?:(?:please\s+)?forget\s+(?:that\s+)?(?P<body2>.+))|"
+    r"(?:(?:please\s+)?(?:remove|delete|erase)\s+(?:the\s+)?(?P<body3>.+?)\s+(?:note|task|context))"
     r")[\s?!.]*$",
     re.IGNORECASE | re.DOTALL,
 )
@@ -152,7 +153,8 @@ async def try_builtin(*, user_id: str, text: str) -> BuiltinHit | None:
     # Forget / remove from context — "remove ShoutOut's 300% growth from context"
     m = _FORGET_RE.match(stripped_clean)
     if m:
-        body = _clean_title(m.group("body"))
+        body_val = m.group("body1") or m.group("body2") or m.group("body3")
+        body = _clean_title(body_val) if body_val else ""
         if body:
             return await _forget_context(user_id=user_id, query=body)
 

@@ -145,7 +145,7 @@ export function ChatView() {
   return (
     <div className="flex flex-col h-full bg-[#131314] select-none relative">
       {/* Top Header */}
-      <header className="safe-top px-6 py-4 flex items-center justify-between border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20">
+      <header className="header-safe-pt px-6 pb-4 flex items-center justify-between border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20">
         <div className="flex items-center gap-3">
           {/* Logo */}
           <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#7c5cff] via-[#9b76ff] to-[#f43f5e] shadow-[0_0_15px_rgba(124,92,255,0.3)] shrink-0">

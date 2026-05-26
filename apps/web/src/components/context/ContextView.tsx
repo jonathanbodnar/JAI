@@ -11,7 +11,7 @@ export function ContextView() {
   const [tab, setTab] = useState("graph");
   return (
     <div className="flex flex-col h-full">
-      <header className="safe-top px-4 py-3 border-b border-[var(--line)]">
+      <header className="header-safe-pt px-4 pb-3 border-b border-[var(--line)]">
         <h1 className="text-base font-semibold tracking-tight">Context</h1>
         <p className="text-xs text-[var(--fg-mute)] mt-0.5">
           Everything JAI knows about you. Edit anything.

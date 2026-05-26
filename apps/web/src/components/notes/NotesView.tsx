@@ -36,7 +36,7 @@ export function NotesView() {
   return (
     <div className="flex flex-col h-full bg-[#131314] select-none text-[#ececef]">
       {/* Header with Search */}
-      <header className="safe-top px-6 py-4 flex flex-col sm:flex-row sm:items-center gap-4 border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20 shrink-0">
+      <header className="header-safe-pt px-6 pb-4 flex flex-col sm:flex-row sm:items-center gap-4 border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20 shrink-0">
         <div className="flex items-center gap-2.5 shrink-0">
           <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#ec4899] to-[#8b5cf6] shadow-[0_0_15px_rgba(236,72,153,0.3)]">
             <StickyNote size={18} className="text-white" />
@@ -173,7 +173,7 @@ function Composer({ onCreated }: { onCreated: () => void }) {
     return (
       <button
         onClick={() => setOpen(true)}
-        className="flex items-center gap-2.5 px-4.5 py-3 rounded-2xl border border-dashed border-[#2d2f31] text-[var(--accent)] text-sm font-semibold hover:border-[var(--accent)]/50 hover:bg-[#1e1f20]/30 transition-all w-full select-none"
+        className="flex items-center gap-2.5 px-5 py-3.5 rounded-2xl border border-dashed border-[#2d2f31] text-[var(--accent)] text-sm font-semibold hover:border-[var(--accent)]/50 hover:bg-[#1e1f20]/30 transition-all w-full select-none"
       >
         <span className="h-6 w-6 rounded-full bg-[var(--accent)]/10 flex items-center justify-center">
           <Plus size={14} strokeWidth={2.5} />
@@ -186,7 +186,7 @@ function Composer({ onCreated }: { onCreated: () => void }) {
   return (
     <div
       ref={containerRef}
-      className="rounded-2xl border border-[var(--accent)]/30 bg-[#1e1f20] p-4.5 space-y-2.5 shadow-lg"
+      className="rounded-2xl border border-[var(--accent)]/30 bg-[#1e1f20] p-5 space-y-3 shadow-lg"
     >
       <input
         autoFocus

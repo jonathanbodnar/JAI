@@ -15,7 +15,7 @@ export function SettingsView() {
   const [tab, setTab] = useState("status");
   return (
     <div className="flex flex-col h-full">
-      <header className="safe-top px-4 py-3 border-b border-[var(--line)] flex items-center gap-3">
+      <header className="header-safe-pt px-4 pb-3 border-b border-[var(--line)] flex items-center gap-3">
         <Link href="/" className="text-[var(--fg-mute)]" aria-label="Back">
           <ChevronLeft size={20} />
         </Link>

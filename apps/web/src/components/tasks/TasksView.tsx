@@ -39,7 +39,7 @@ export function TasksView() {
   return (
     <div className="flex flex-col h-full bg-[#131314] select-none text-[#ececef]">
       {/* Header */}
-      <header className="safe-top px-6 py-4 flex items-center justify-between border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20 shrink-0">
+      <header className="header-safe-pt px-6 pb-4 flex items-center justify-between border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20 shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#3b82f6] to-[#10b981] shadow-[0_0_15px_rgba(59,130,246,0.3)]">
             <ListTodo size={18} className="text-white" />
@@ -136,7 +136,7 @@ function NewTaskInput({ listId, onCreated }: { listId: string; onCreated: () => 
     return (
       <button
         onClick={() => setOpen(true)}
-        className="flex items-center gap-2.5 px-4.5 py-3 rounded-2xl border border-dashed border-[#2d2f31] text-[var(--accent)] text-sm font-semibold hover:border-[var(--accent)]/50 hover:bg-[#1e1f20]/30 transition-all w-full select-none"
+        className="flex items-center gap-2.5 px-5 py-3.5 rounded-2xl border border-dashed border-[#2d2f31] text-[var(--accent)] text-sm font-semibold hover:border-[var(--accent)]/50 hover:bg-[#1e1f20]/30 transition-all w-full select-none"
       >
         <span className="h-6 w-6 rounded-full bg-[var(--accent)]/10 flex items-center justify-center">
           <Plus size={14} strokeWidth={2.5} />
@@ -146,8 +146,8 @@ function NewTaskInput({ listId, onCreated }: { listId: string; onCreated: () => 
     );
   }
   return (
-    <div className="px-4.5 py-3 rounded-2xl bg-[#1e1f20] border border-[var(--accent)]/30 flex items-center gap-3 shadow-inner">
-      <span className="h-5 w-5 rounded-full border border-[#8e918f]/50" />
+    <div className="px-5 py-3.5 rounded-2xl bg-[#1e1f20] border border-[var(--accent)]/30 flex items-center gap-3 shadow-inner">
+      <span className="h-5 w-5 rounded-full border border-[#8e918f]/50 shrink-0" />
       <input
         autoFocus
         value={v}
