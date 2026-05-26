@@ -163,15 +163,18 @@ async def _execute(
         result_preview = _preview(raw.get("result"))
         text = f"Done{suffix}. {result_preview}" if result_preview else f"Done{suffix}."
     else:
-        # Keep enough of the error in the user-facing message that they can
-        # actually act on it (token expired → reconnect, 403 → grant scope,
-        # etc.) without digging into Supabase.
+        # Translate well-known Google / OAuth / sandbox errors into
+        # actionable instructions before falling back to the raw diag.
         diag = _error_diag(raw)
-        text = (
-            "That didn't work — the script errored out.\n\n"
-            f"```\n{diag}\n```\n"
-            "Want me to try a different approach, or reconnect the account in Settings?"
-        )
+        hint = _actionable_hint(diag, raw)
+        if hint:
+            text = hint
+        else:
+            text = (
+                "That didn't work — the script errored out.\n\n"
+                f"```\n{diag}\n```\n"
+                "Want me to try a different approach, or reconnect the account in Settings?"
+            )
 
     return SkillOutcome(
         final_text=text,
@@ -319,3 +322,68 @@ def _error_diag(raw: dict | None) -> str:
     if len(text) > 1200:
         text = text[-1200:]
     return text
+
+
+def _actionable_hint(diag: str, raw: dict | None) -> str | None:
+    """Translate well-known failures into a clear, actionable user message.
+
+    Returns `None` if no rule matches — caller falls back to the raw diag.
+    Each branch produces a complete chat reply (with the relevant link
+    or next step) so the user never has to read a Python traceback.
+    """
+    import re
+
+    if not diag:
+        return None
+    d = diag.lower()
+
+    # Google API not enabled on the Cloud project. The error body always
+    # includes "API has not been used in project N before or it is
+    # disabled" plus a direct enable URL we can hand to the user.
+    if "accessnotconfigured" in d or "api has not been used in project" in d:
+        m = re.search(
+            r"https://console\.developers\.google\.com/apis/api/([\w.\-]+)/overview\?project=(\d+)",
+            diag,
+        )
+        if m:
+            api = m.group(1)
+            project = m.group(2)
+            pretty = {
+                "gmail.googleapis.com": "Gmail API",
+                "calendar-json.googleapis.com": "Calendar API",
+                "drive.googleapis.com": "Drive API",
+            }.get(api, api)
+            url = f"https://console.developers.google.com/apis/api/{api}/overview?project={project}"
+            return (
+                f"The **{pretty}** isn't enabled on your Google Cloud project yet. "
+                f"That's a one-click fix: open [this link]({url}) and click "
+                "**Enable**, wait ~30 seconds, then ask me again."
+            )
+
+    # Refresh token rejected / revoked. Re-auth in Settings.
+    if "invalid_grant" in d or "token has been expired or revoked" in d:
+        return (
+            "Your Google sign-in expired or was revoked. Open **Settings → "
+            "Connections**, hit the trash icon on the Gmail/Calendar/Drive "
+            "account, and reconnect it."
+        )
+
+    # Missing OAuth scope (vs. API not enabled — those are different 403s).
+    if "insufficient" in d and ("scope" in d or "permission" in d):
+        return (
+            "The connected Google account doesn't have the right permission "
+            "for this. Open **Settings → Connections**, disconnect that "
+            "account, and reconnect it — Google will re-prompt for the "
+            "missing scopes."
+        )
+
+    # Sandbox couldn't pip-install something. Tell the user which package
+    # so we can decide whether to add it permanently or rewrite the skill.
+    if "FAILED" in diag and "pip install" in diag:
+        return (
+            "The skill needed a Python package that isn't available in the "
+            "sandbox. Tell me what you were trying to do and I'll rewrite "
+            "the skill to use only the pre-installed libraries."
+        )
+
+    return None
