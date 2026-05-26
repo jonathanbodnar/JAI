@@ -53,10 +53,16 @@ export function ChatView() {
   const [thinking, setThinking] = useState(false);
   const [recording, setRecording] = useState(false);
   const [liveSteps, setLiveSteps] = useState<Step[]>([]);
+  // When the server reports an interrupted turn (Railway redeploy
+  // killed it mid-skill) we stash the original prompt + a timestamp so
+  // we can render a Retry banner above the composer.
+  const [lastUserInput, setLastUserInput] = useState<string>("");
+  const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
   const liveStepsRef = useRef<Step[]>([]);
   const wsRef = useRef<ChatSocket | null>(null);
   const recRef = useRef<PressRecorder | null>(null);
   const playerRef = useRef<StreamingAudioPlayer | null>(null);
+  const thinkingStartRef = useRef<number | null>(null);
 
   useEffect(() => {
     saveMessages(messages);
@@ -66,24 +72,60 @@ export function ChatView() {
     liveStepsRef.current = liveSteps;
   }, [liveSteps]);
 
+  // Watchdog — if `thinking` stays on for >2 minutes with no fresh
+  // activity, assume the in-flight turn was killed (Railway deploy,
+  // process crash, etc.) and surface a Retry option instead of
+  // spinning forever. The server-side orphan detection in /chat/recent
+  // catches refreshes; this catches users who stayed on the page.
+  useEffect(() => {
+    if (!thinking) {
+      thinkingStartRef.current = null;
+      return;
+    }
+    if (thinkingStartRef.current == null) {
+      thinkingStartRef.current = Date.now();
+    }
+    const t = setInterval(() => {
+      const started = thinkingStartRef.current;
+      if (!started) return;
+      if (Date.now() - started > 120_000) {
+        setThinking(false);
+        const lastUser = [...messages].reverse().find((m) => m.role === "user");
+        if (lastUser) setLastUserInput(lastUser.text);
+        setInterruptedAt(Date.now());
+        thinkingStartRef.current = null;
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [thinking, messages]);
+
   // Pulls recent messages from the server and merges any that the local
   // client missed (e.g. an assistant_final the server persisted while we
   // were on another tab / page).
   const recoverFromServer = async () => {
     try {
-      const { messages: rows } = (await api("/chat/recent?limit=100")) as {
+      const { messages: rows, interrupted } = (await api(
+        "/chat/recent?limit=100",
+      )) as {
         messages: ServerMessageRow[];
+        interrupted?: boolean;
       };
       if (!Array.isArray(rows) || rows.length === 0) return;
       setMessages((prev) => {
         const merged = mergeServerMessages(prev, rows);
-        // If the last message is from the user, the server is presumably
-        // still drafting a reply — surface that with the thinking spinner
-        // so a page refresh mid-turn doesn't look like the request was
-        // dropped. The Realtime subscription will clear it when the
-        // assistant row arrives.
         const last = merged[merged.length - 1];
-        if (last && last.role === "user") setThinking(true);
+        if (last && last.role === "user") {
+          // Server says the in-flight turn was killed (almost always a
+          // Railway deploy mid-skill). Don't keep spinning forever —
+          // surface a retry affordance and stop the spinner.
+          if (interrupted) {
+            setThinking(false);
+            setLastUserInput(last.text);
+            setInterruptedAt(Date.now());
+          } else {
+            setThinking(true);
+          }
+        }
         return merged;
       });
     } catch {
@@ -150,7 +192,13 @@ export function ChatView() {
                 },
               ];
             });
-            if (row.role === "assistant") setThinking(false);
+            if (row.role === "assistant") {
+              setThinking(false);
+              // If the late reply finally lands, retire the interrupted
+              // banner — no point asking the user to retry something
+              // that just succeeded.
+              setInterruptedAt(null);
+            }
           },
         )
         .subscribe();
@@ -243,7 +291,20 @@ export function ChatView() {
     setMessages((prev) => [...prev, { id: cryptoId(), role: "user", text }]);
     setLiveSteps([]);
     setThinking(true);
+    setInterruptedAt(null);
     wsRef.current.sendText(text);
+  };
+
+  const retryInterrupted = () => {
+    if (!lastUserInput) return;
+    setInterruptedAt(null);
+    setLiveSteps([]);
+    setThinking(true);
+    wsRef.current?.sendText(lastUserInput);
+  };
+
+  const dismissInterrupted = () => {
+    setInterruptedAt(null);
   };
 
   const onTalkStart = async () => {
@@ -366,6 +427,31 @@ export function ChatView() {
       {/* Centered Pill Input Pack */}
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-[#131314] via-[#131314]/90 to-transparent pt-12 pb-24 md:pb-6 z-10 pointer-events-none">
         <div className="pointer-events-auto">
+          {interruptedAt && (
+            <div className="max-w-3xl mx-auto px-4 mb-2">
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 flex items-center gap-3 text-[12px]">
+                <span className="text-amber-400 shrink-0">⚠</span>
+                <span className="flex-1 text-amber-100/90">
+                  That request was interrupted (likely a server restart).
+                  Want me to retry it?
+                </span>
+                <button
+                  onClick={retryInterrupted}
+                  disabled={!connected}
+                  className="px-3 py-1 rounded-full bg-[var(--accent)] text-white text-[11px] font-medium hover:opacity-90 transition disabled:opacity-50"
+                >
+                  Retry
+                </button>
+                <button
+                  onClick={dismissInterrupted}
+                  className="text-[var(--fg-mute)] hover:text-white text-[11px] px-2"
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
           <Composer
             onSend={send}
             disabled={!connected}

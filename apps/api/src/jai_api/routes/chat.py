@@ -42,13 +42,18 @@ async def recent_messages(user: CurrentUserDep, limit: int = 100) -> dict:
 
     Used by the web client to recover a mid-turn response that was persisted
     on the server while the WebSocket was disconnected (e.g. the user
-    navigated away from /chat while the LLM was still drafting).
+    navigated away from /chat while the LLM was still drafting OR a Railway
+    deploy killed the API mid-turn). When we detect an orphaned user
+    message (no AI reply, older than ORPHAN_THRESHOLD), we mark it as
+    interrupted in `metadata.orphan=true` and prompt the client to surface
+    a "retry" affordance instead of spinning forever.
     """
+    from datetime import datetime, timedelta, timezone
     try:
         sb = supabase_admin()
     except Exception as e:
         log.warning("supabase.unavailable", error=str(e))
-        return {"messages": []}
+        return {"messages": [], "interrupted": False}
     try:
         conv_id = await _primary_conversation_id(sb, user.user_id)
         res = (
@@ -60,10 +65,42 @@ async def recent_messages(user: CurrentUserDep, limit: int = 100) -> dict:
             .execute()
         )
         rows = list(reversed(res.data or []))
-        return {"messages": rows}
+
+        # Detect an orphaned user message — one that's been sitting >90s
+        # without any AI reply. Almost always means a server restart
+        # killed the in-flight skill / LLM call.
+        interrupted = False
+        if rows:
+            last = rows[-1]
+            if last.get("role") == "user":
+                try:
+                    created = datetime.fromisoformat(
+                        last["created_at"].replace("Z", "+00:00")
+                    )
+                except Exception:
+                    created = None
+                age = (
+                    (datetime.now(timezone.utc) - created).total_seconds()
+                    if created else 0
+                )
+                if age > 90:
+                    interrupted = True
+                    # Tag the row so the frontend can render an "interrupted" hint
+                    # next to the user bubble without changing message ordering.
+                    last_meta = dict(last.get("metadata") or {})
+                    last_meta["orphan"] = True
+                    last["metadata"] = last_meta
+                    try:
+                        sb.table("messages").update({"metadata": last_meta}).eq(
+                            "id", last["id"]
+                        ).execute()
+                    except Exception:
+                        pass  # cosmetic; safe to ignore
+
+        return {"messages": rows, "interrupted": interrupted}
     except Exception as e:
         log.warning("chat.recent.failed", error=str(e))
-        return {"messages": []}
+        return {"messages": [], "interrupted": False}
 
 
 @router.post("/reset")
