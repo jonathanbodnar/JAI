@@ -1,9 +1,9 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { api } from "@/lib/api";
 import { useRealtimeRevalidate } from "@/lib/realtime";
-import { FileText, MessageSquare, Search, Trash2 } from "lucide-react";
+import { FileText, MessageSquare, Search, Trash2, RefreshCw, AlertCircle } from "lucide-react";
 
 type Doc = {
   id: string;
@@ -47,6 +47,7 @@ export function ContextDocs() {
   const { data: docs, mutate: mutateDocs } = useSWR<Doc[]>(
     "/context/documents",
     (k: string) => api(k),
+    { refreshInterval: 5000 },   // refresh while anything is processing
   );
   useRealtimeRevalidate("documents", "/context/documents");
 
@@ -54,6 +55,15 @@ export function ContextDocs() {
     "/notes?include_archived=true",
     (k: string) => api<Note[]>(k),
   );
+
+  // On mount: sweep any docs stuck in "processing" >10min — Railway redeploys
+  // kill in-flight FastAPI background tasks. The endpoint flips those rows to
+  // "failed" so the user sees retry buttons instead of forever spinners.
+  useEffect(() => {
+    api("/context/documents/sweep_stuck", { method: "POST" })
+      .then(() => mutateDocs())
+      .catch(() => {});
+  }, [mutateDocs]);
 
   return (
     <div className="p-3 space-y-6 max-w-2xl mx-auto">
@@ -95,6 +105,7 @@ function IngestedDocs({
 function DocRow({ d, onDelete }: { d: Doc; onDelete: () => void }) {
   const [busy, setBusy] = useState(false);
   const Icon = d.kind === "chatgpt_export" ? MessageSquare : FileText;
+
   const remove = async () => {
     if (busy) return;
     if (!confirm(`Remove ${d.filename} from the library? (Vectors stay until nightly cleanup.)`))
@@ -107,6 +118,22 @@ function DocRow({ d, onDelete }: { d: Doc; onDelete: () => void }) {
       setBusy(false);
     }
   };
+
+  const retry = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      // Delete the failed row; the user re-uploads via the Upload tab.
+      // (A true server-side retry would need the original bytes, which we
+      // don't persist for storage reasons.)
+      await api(`/context/documents/${d.id}`, { method: "DELETE" });
+      onDelete();
+      alert("Removed. Re-upload the file under Context → Upload to retry.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <li
       className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[var(--bg-elev)] border border-[var(--line)]"
@@ -137,10 +164,23 @@ function DocRow({ d, onDelete }: { d: Doc; onDelete: () => void }) {
           <span>·</span>
           <span>{fmtDate(d.created_at)}</span>
           {d.status === "failed" && d.error && (
-            <span className="text-[var(--err)]">· {d.error.slice(0, 60)}</span>
+            <span className="text-red-400 flex items-center gap-1">
+              · <AlertCircle size={10} /> {d.error.slice(0, 60)}
+            </span>
           )}
         </div>
       </div>
+      {d.status === "failed" && (
+        <button
+          onClick={retry}
+          disabled={busy}
+          className="p-1.5 text-[var(--fg-mute)] hover:text-white disabled:opacity-40"
+          title="Clear and re-upload"
+          aria-label="Retry"
+        >
+          <RefreshCw size={14} />
+        </button>
+      )}
       <button
         onClick={remove}
         disabled={busy}

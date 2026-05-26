@@ -348,19 +348,28 @@ async def _extract_facts(text: str, max_facts: int = 12) -> list[str]:
         llm = openrouter_chat(model=s.jai_model_orchestrator, settings=s, temperature=0.1)
         prompt = (
             "Extract up to "
-            f"{max_facts} short, durable facts about the human from the text below. "
-            "Focus on: identity, role, beliefs, preferences, recurring themes, "
-            "relationships, goals, values. Skip transient tasks or one-off events. "
-            "Return one fact per line, no numbering, no preamble.\n\n"
+            f"{max_facts} DURABLE, IDENTITY-SHAPED facts about the human from the text. "
+            "Keep ONLY facts that would matter to a personal AI six months from now: "
+            "core identity, role, business/company, recurring beliefs, deep "
+            "preferences, named relationships, ongoing goals, values, signature "
+            "ways of thinking. \n\n"
+            "REJECT and skip: one-off tasks, today's todos, casual questions, "
+            "random metrics they mentioned once (e.g. 'ShoutOut grew 300%' is a "
+            "stat, not an identity fact unless framed as a pattern), administrative "
+            "trivia, anything that reads like a transient note. \n\n"
+            "Return one fact per line, no numbering, no preamble. If nothing meets "
+            "the bar, return ONLY the literal string NONE on its own line.\n\n"
             "TEXT:\n"
             f"{text[:8000]}"
         )
         resp = await llm.ainvoke(prompt)
         raw = str(resp.content or "")
+        if raw.strip().upper().startswith("NONE"):
+            return []
         facts = [
             line.strip().lstrip("-•* ").strip()
             for line in raw.splitlines()
-            if line.strip() and len(line.strip()) > 5
+            if line.strip() and len(line.strip()) > 5 and line.strip().upper() != "NONE"
         ]
         return facts[:max_facts]
     except Exception as e:
@@ -678,6 +687,152 @@ async def delete_document(user: CurrentUserDep, doc_id: str) -> dict[str, Any]:
     sb = supabase_admin()
     sb.table("documents").delete().eq("user_id", user.user_id).eq("id", doc_id).execute()
     return {"ok": True}
+
+
+@router.post("/documents/sweep_stuck")
+async def sweep_stuck_documents(user: CurrentUserDep, older_than_min: int = 10) -> dict[str, Any]:
+    """Mark any document stuck in 'processing' for >N min as failed.
+
+    Background ingest tasks die silently when the FastAPI worker restarts
+    (Railway redeploys, OOM, etc.), leaving rows in 'processing' forever.
+    Run this on every doc-list fetch from the UI so the badge reflects
+    reality and the user can retry.
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=older_than_min)).isoformat()
+    sb = supabase_admin()
+    res = (
+        sb.table("documents")
+        .update({"status": "failed", "error": "ingest worker timed out — click retry"})
+        .eq("user_id", user.user_id)
+        .eq("status", "processing")
+        .lt("created_at", cutoff)
+        .execute()
+    )
+    return {"ok": True, "swept": len(res.data or [])}
+
+
+# --- graph CRUD ----------------------------------------------------------
+
+
+class GraphNodePatch(BaseModel):
+    name: str
+
+
+@router.delete("/graph/node/{node_id}")
+async def delete_graph_node(user: CurrentUserDep, node_id: str) -> dict[str, Any]:
+    """Detach-delete one node from the user's identity graph."""
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        raise HTTPException(503, f"graph unavailable: {e}") from e
+    try:
+        deleted = await n4.delete_entity(user_id=user.user_id, node_id=node_id)
+        if deleted == 0:
+            raise HTTPException(404, "node not found")
+        await audit_write(
+            user_id=user.user_id,
+            actor="context",
+            action="context.graph.node.delete",
+            payload={"node_id": node_id},
+        )
+        return {"ok": True, "deleted": deleted}
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
+
+
+@router.patch("/graph/node/{node_id}")
+async def patch_graph_node(
+    user: CurrentUserDep, node_id: str, body: GraphNodePatch
+) -> dict[str, Any]:
+    """Rename a node (the only safe in-place edit for now)."""
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name required")
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        raise HTTPException(503, f"graph unavailable: {e}") from e
+    try:
+        ok = await n4.update_entity_name(
+            user_id=user.user_id, node_id=node_id, name=name
+        )
+        if not ok:
+            raise HTTPException(404, "node not found")
+        return {"ok": True, "name": name}
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
+
+
+class ContextForget(BaseModel):
+    query: str
+    scopes: list[str] | None = None   # ["qdrant","graph","mem0"] — default all
+
+
+@router.post("/forget")
+async def context_forget(user: CurrentUserDep, body: ContextForget) -> dict[str, Any]:
+    """One-shot 'remove this from my context' that nukes everything matching.
+
+    Used by the chat fast-path when the user says e.g. "remove ShoutOut's 300%
+    growth from context". Hits all three memory tiers and reports what went.
+    """
+    q = (body.query or "").strip()
+    if not q:
+        raise HTTPException(400, "query required")
+    scopes = set(body.scopes or ["qdrant", "graph", "mem0"])
+    out: dict[str, Any] = {"query": q, "deleted": {}}
+
+    if "qdrant" in scopes:
+        qd = JaiQdrant()
+        try:
+            await qd.ensure_collection()
+            n = await qd.delete_by_query(user_id=user.user_id, query=q, top_k=25)
+            out["deleted"]["qdrant"] = n
+        finally:
+            try:
+                await qd.close()
+            except Exception:
+                pass
+
+    if "graph" in scopes:
+        try:
+            n4 = JaiNeo4j()
+            try:
+                # Try to match by name fragment — keeps the API simple.
+                nodes = await n4.delete_by_name_fragment(
+                    user_id=user.user_id, fragment=q
+                )
+                out["deleted"]["graph"] = [n["name"] for n in nodes]
+            finally:
+                try:
+                    await n4.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("forget.graph_failed", error=str(e))
+            out["deleted"]["graph"] = []
+
+    if "mem0" in scopes:
+        try:
+            mem = JaiMem0()
+            out["deleted"]["mem0"] = await mem.delete_about(user.user_id, q)
+        except Exception as e:
+            log.warning("forget.mem0_failed", error=str(e))
+            out["deleted"]["mem0"] = 0
+
+    await audit_write(
+        user_id=user.user_id,
+        actor="context",
+        action="context.forget",
+        payload=out,
+    )
+    return out
 
 
 @router.post("/graph/rebuild")

@@ -78,6 +78,18 @@ _TASK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Detect 'remove/forget X from context/memory' intent — keeps the user out
+# of the skill builder when they're just trying to prune mistakes.
+_FORGET_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:please\s+)?(?:remove|delete|forget|drop|wipe|clear|erase|"
+    r"strike|take\s+out|get\s+rid\s+of)\s+(?P<body>.+?)"
+    r"\s+(?:from\s+)?(?:my\s+)?(?:context|memory|graph|brain|jai|knowledge|notes?)"
+    r")[\s?!.]*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 # Detect explicit "schedule a recurring action" intent.
 # Groups: freq_word (daily/weekly/etc.), dow (monday/etc.), hour (8am/etc.), body (what to do)
 _SCHEDULE_RE = re.compile(
@@ -137,6 +149,13 @@ async def try_builtin(*, user_id: str, text: str) -> BuiltinHit | None:
     if _MORNING_RE.match(text.strip()):
         return await _morning_briefing(user_id=user_id, text=text.strip())
 
+    # Forget / remove from context — "remove ShoutOut's 300% growth from context"
+    m = _FORGET_RE.match(stripped_clean)
+    if m:
+        body = _clean_title(m.group("body"))
+        if body:
+            return await _forget_context(user_id=user_id, query=body)
+
     # Scheduling intent — "remind me daily about X", "every Monday check X", etc.
     m = _SCHEDULE_RE.match(stripped_clean)
     if m:
@@ -161,6 +180,76 @@ def _clean_title(s: str) -> str:
     if s.lower().startswith("to "):
         s = s[3:].strip()
     return s
+
+
+async def _forget_context(*, user_id: str, query: str) -> BuiltinHit:
+    """Remove `query` from Qdrant / Neo4j / Mem0 in one shot."""
+    from ..memory.mem0 import JaiMem0
+    from ..memory.neo4j_client import JaiNeo4j
+    from ..memory.qdrant import JaiQdrant
+
+    deleted_qdrant = 0
+    deleted_graph: list[str] = []
+    deleted_mem0 = 0
+
+    qd = JaiQdrant()
+    try:
+        await qd.ensure_collection()
+        deleted_qdrant = await qd.delete_by_query(user_id=user_id, query=query, top_k=25)
+    finally:
+        try:
+            await qd.close()
+        except Exception:
+            pass
+
+    try:
+        n4 = JaiNeo4j()
+        try:
+            nodes = await n4.delete_by_name_fragment(user_id=user_id, fragment=query)
+            deleted_graph = [n["name"] for n in nodes]
+        finally:
+            try:
+                await n4.close()
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("forget.graph_failed", error=str(e))
+
+    try:
+        mem = JaiMem0()
+        deleted_mem0 = await mem.delete_about(user_id, query)
+    except Exception as e:
+        log.warning("forget.mem0_failed", error=str(e))
+
+    log.info(
+        "builtin.forget.done",
+        query=query,
+        qdrant=deleted_qdrant,
+        graph=len(deleted_graph),
+        mem0=deleted_mem0,
+        user=user_id[:8],
+    )
+
+    bits: list[str] = []
+    if deleted_qdrant:
+        bits.append(f"{deleted_qdrant} embedded chunk{'s' if deleted_qdrant != 1 else ''}")
+    if deleted_graph:
+        bits.append(
+            f"{len(deleted_graph)} graph node{'s' if len(deleted_graph) != 1 else ''}"
+            f" ({', '.join(deleted_graph[:3])})"
+        )
+    if deleted_mem0:
+        bits.append(f"{deleted_mem0} identity fact{'s' if deleted_mem0 != 1 else ''}")
+
+    if not bits:
+        response = (
+            f"I searched for \"{query}\" across your context (embedded chunks, identity "
+            f"graph, and Mem0 facts) and didn't find anything matching. Nothing to remove."
+        )
+    else:
+        response = f"Removed from your context: {', '.join(bits)}."
+
+    return BuiltinHit(kind="forget_context", response=response, record_id=None)
 
 
 async def _create_schedule(*, user_id: str, match: re.Match) -> BuiltinHit:

@@ -62,6 +62,50 @@ class JaiNeo4j:
         async with self._driver.session(database=self._db) as sess:
             await sess.run(cypher, id=entity_id, user_id=user_id, props=properties)
 
+    async def delete_entity(self, *, user_id: str, node_id: str) -> int:
+        """Detach-delete one node belonging to this user. Returns rows touched."""
+        cypher = (
+            "MATCH (n {id: $id, user_id: $uid}) "
+            "DETACH DELETE n "
+            "RETURN count(n) AS n"
+        )
+        async with self._driver.session(database=self._db) as sess:
+            res = await sess.run(cypher, id=node_id, uid=user_id)
+            rec = await res.single()
+            return int(rec["n"]) if rec else 0
+
+    async def update_entity_name(self, *, user_id: str, node_id: str, name: str) -> bool:
+        """Rename a node and bump updated_at."""
+        cypher = (
+            "MATCH (n {id: $id, user_id: $uid}) "
+            "SET n.name = $name, n.updated_at = datetime() "
+            "RETURN n"
+        )
+        async with self._driver.session(database=self._db) as sess:
+            res = await sess.run(cypher, id=node_id, uid=user_id, name=name)
+            return (await res.single()) is not None
+
+    async def delete_by_name_fragment(
+        self, *, user_id: str, fragment: str
+    ) -> list[dict]:
+        """Detach-delete every node whose name contains `fragment` (case-insensitive).
+        Returns the deleted nodes' {id, label, name} for confirmation messaging."""
+        if not fragment.strip():
+            return []
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.user_id = $uid AND toLower(n.name) CONTAINS toLower($frag) "
+            "WITH n, labels(n)[0] AS label, n.id AS id, n.name AS name "
+            "DETACH DELETE n "
+            "RETURN id, label, name"
+        )
+        out: list[dict] = []
+        async with self._driver.session(database=self._db) as sess:
+            res = await sess.run(cypher, uid=user_id, frag=fragment.strip())
+            async for rec in res:
+                out.append({"id": rec["id"], "label": rec["label"], "name": rec["name"]})
+        return out
+
     async def upsert_rel(
         self,
         *,

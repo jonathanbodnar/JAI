@@ -135,13 +135,20 @@ async def chat_ws(ws: WebSocket, user: CurrentUser = Depends(_ws_user)):
 
             if mtype == "user_audio_done":
                 expecting_audio = False
-                if audio_buffer.tell() == 0:
+                audio = audio_buffer.getvalue()
+                if not audio:
                     await ws.send_json({"type": "error", "message": "no audio captured"})
                     continue
+                # Sniff container so Whisper / Groq STT gets the right hint.
+                mime = _sniff_audio_mime(audio)
                 try:
-                    text = await stt.transcribe(audio_buffer.getvalue())
+                    text = await stt.transcribe(audio, mime=mime)
                 except Exception as e:
+                    log.warning("stt.failed", error=str(e), bytes=len(audio), mime=mime)
                     await ws.send_json({"type": "error", "message": f"stt failed: {e}"})
+                    continue
+                if not (text or "").strip():
+                    await ws.send_json({"type": "error", "message": "empty transcription — try again with a clearer / longer hold"})
                     continue
                 await ws.send_json({"type": "user_transcript", "text": text})
                 await _run_turn(ws, graph, user, conv_id, text, tts, sb)
@@ -162,6 +169,27 @@ async def chat_ws(ws: WebSocket, user: CurrentUser = Depends(_ws_user)):
             await ws.close()
         except Exception:
             pass
+
+
+def _sniff_audio_mime(buf: bytes) -> str:
+    """Best-effort container detection from the first few bytes.
+
+    MediaRecorder defaults to webm on Chrome / Firefox; Safari / iOS use mp4
+    (with an `ftyp` box at byte 4). We can't trust the client's mime string
+    once we've round-tripped through a binary WebSocket frame.
+    """
+    head = buf[:16]
+    if head.startswith(b"\x1aE\xdf\xa3"):
+        return "audio/webm"
+    if len(head) >= 8 and head[4:8] in (b"ftyp", b"moov", b"mdat"):
+        return "audio/mp4"
+    if head.startswith(b"OggS"):
+        return "audio/ogg"
+    if head.startswith(b"ID3") or head[:2] == b"\xff\xfb":
+        return "audio/mpeg"
+    if head.startswith(b"RIFF") and len(head) >= 12 and head[8:12] == b"WAVE":
+        return "audio/wav"
+    return "audio/webm"
 
 
 async def _primary_conversation_id(sb, user_id: str) -> str:
@@ -192,17 +220,21 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
         "input_text": text,
     }
 
-    # Persist user message first (best-effort).
+    # Fire-and-forget the user-message insert so it never blocks the LLM.
     if sb:
-        try:
-            sb.table("messages").insert({
-                "conversation_id": conv_id,
-                "user_id": user.user_id,
-                "role": "user",
-                "content": text,
-            }).execute()
-        except Exception as e:
-            log.warning("messages.user.insert_failed", error=str(e))
+        async def _insert_user():
+            try:
+                await asyncio.to_thread(
+                    lambda: sb.table("messages").insert({
+                        "conversation_id": conv_id,
+                        "user_id": user.user_id,
+                        "role": "user",
+                        "content": text,
+                    }).execute()
+                )
+            except Exception as e:
+                log.warning("messages.user.insert_failed", error=str(e))
+        asyncio.create_task(_insert_user())
 
     final_text = ""
     role_used: str | None = None
@@ -215,25 +247,32 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
         await ws.send_json({"type": "error", "message": f"graph failed: {e}"})
         return
 
+    # Send the user-visible text IMMEDIATELY — no waiting on DB or TTS.
     await ws.send_json({
         "type": "assistant_final",
         "text": final_text,
         "role_used": role_used,
     })
 
+    # Persist assistant turn in the background.
     if sb:
-        try:
-            sb.table("messages").insert({
-                "conversation_id": conv_id,
-                "user_id": user.user_id,
-                "role": "assistant",
-                "content": final_text,
-                "metadata": {"role_used": role_used} if role_used else {},
-            }).execute()
-        except Exception as e:
-            log.warning("messages.assistant.insert_failed", error=str(e))
+        async def _insert_assistant():
+            try:
+                await asyncio.to_thread(
+                    lambda: sb.table("messages").insert({
+                        "conversation_id": conv_id,
+                        "user_id": user.user_id,
+                        "role": "assistant",
+                        "content": final_text,
+                        "metadata": {"role_used": role_used} if role_used else {},
+                    }).execute()
+                )
+            except Exception as e:
+                log.warning("messages.assistant.insert_failed", error=str(e))
+        asyncio.create_task(_insert_assistant())
 
-    # Stream TTS audio back (best-effort).
+    # Stream TTS audio back (best-effort). Wrap in try/except so a failed
+    # Kokoro server never breaks the chat.
     try:
         async for chunk in tts.stream(final_text):
             await ws.send_json({
@@ -243,4 +282,7 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
         await ws.send_json({"type": "audio_done"})
     except Exception as e:
         log.warning("tts.failed", error=str(e))
-        await ws.send_json({"type": "audio_done", "skipped": True})
+        try:
+            await ws.send_json({"type": "audio_done", "skipped": True})
+        except Exception:
+            pass

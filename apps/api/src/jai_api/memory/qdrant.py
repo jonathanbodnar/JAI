@@ -232,5 +232,61 @@ class JaiQdrant:
         log.info("qdrant.pruned", count=count, user=user_id)
         return count
 
+    async def delete_by_query(self, *, user_id: str, query: str, top_k: int = 25) -> int:
+        """Delete the top-k semantic matches for `query`. Used by 'forget X' /
+        'remove X from context' so the user can prune accidentally-saved
+        content without nuking everything.
+
+        Returns the number of points deleted (approx; matches Qdrant's
+        ack behavior).
+        """
+        if not query.strip():
+            return 0
+        try:
+            emb = await self._embed.aembed_query(query)
+            resp = await self._client.query_points(
+                collection_name=self._collection,
+                query=emb,
+                limit=top_k,
+                query_filter=Filter(
+                    must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+                ),
+                with_payload=False,
+            )
+            ids = [p.id for p in resp.points]
+            if not ids:
+                return 0
+            await self._client.delete(
+                collection_name=self._collection,
+                points_selector=ids,
+            )
+            log.info("qdrant.deleted_by_query", count=len(ids), user=user_id[:8])
+            return len(ids)
+        except Exception as e:
+            log.warning("qdrant.delete_by_query_failed", error=str(e))
+            return 0
+
+    async def delete_by_id(self, *, user_id: str, point_id: str) -> bool:
+        """Delete a single point if it belongs to this user."""
+        try:
+            pts = await self._client.retrieve(
+                collection_name=self._collection,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not pts:
+                return False
+            if (pts[0].payload or {}).get("user_id") != user_id:
+                return False
+            await self._client.delete(
+                collection_name=self._collection,
+                points_selector=[point_id],
+            )
+            return True
+        except Exception as e:
+            log.warning("qdrant.delete_by_id_failed", error=str(e))
+            return False
+
     async def close(self) -> None:
         await self._client.close()

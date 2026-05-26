@@ -111,23 +111,41 @@ export function ChatView() {
   const onTalkStart = async () => {
     if (!wsRef.current) return;
     recRef.current = new PressRecorder();
-    wsRef.current.sendAudioStart();
     setRecording(true);
     try {
-      await recRef.current.start((chunk) => wsRef.current?.sendAudioChunk(chunk));
+      await recRef.current.start();
+      // Tell the server we're about to send one audio blob.
+      wsRef.current.sendAudioStart();
     } catch (e) {
       setMessages((prev) => [
         ...prev,
         { id: cryptoId(), role: "assistant", text: `⚠️ mic error: ${(e as Error).message}` },
       ]);
       setRecording(false);
+      recRef.current = null;
     }
   };
 
   const onTalkEnd = async () => {
     setRecording(false);
     if (!recRef.current || !wsRef.current) return;
-    await recRef.current.stop();
+    let blob: Blob;
+    try {
+      blob = await recRef.current.stop();
+    } catch {
+      return;
+    } finally {
+      recRef.current = null;
+    }
+    if (blob.size === 0) {
+      setMessages((prev) => [
+        ...prev,
+        { id: cryptoId(), role: "assistant", text: "⚠️ no audio captured — try holding the mic a bit longer." },
+      ]);
+      return;
+    }
+    const buf = await blob.arrayBuffer();
+    wsRef.current.sendAudioChunk(buf);
     wsRef.current.sendAudioDone();
     setThinking(true);
   };

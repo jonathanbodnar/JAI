@@ -6,14 +6,23 @@ import {
   Background,
   Controls,
   MiniMap,
+  Handle,
   type Node,
   type Edge,
+  type NodeProps,
   Position,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import dagre from "dagre";
-import { useEffect, useMemo, useState } from "react";
-import { RefreshCw, X } from "lucide-react";
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  type SimulationNodeDatum,
+} from "d3-force";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw, X, Trash2, Pencil, Check } from "lucide-react";
 
 type GraphNode = {
   id: string;
@@ -48,8 +57,10 @@ const labelColors: Record<string, string> = {
   Conversation: "#475569",
 };
 
-const NODE_W = 180;
-const NODE_H = 44;
+const BASE_RADIUS = 14;          // smallest node = single belief / leaf
+const MAX_RADIUS = 32;           // most-connected node
+const LINK_DIST = 90;
+const CHARGE = -260;
 
 function truncate(s: string, n: number): string {
   s = (s || "").trim();
@@ -57,10 +68,167 @@ function truncate(s: string, n: number): string {
 }
 
 function nodeDisplay(d: GraphNode): string {
-  // Beliefs use the full sentence as name; truncate hard so they don't tower
-  // over the rest of the graph.
-  const limit = d.label === "Belief" ? 36 : 28;
+  const limit = d.label === "Belief" ? 28 : 20;
   return truncate(d.name || d.id, limit);
+}
+
+/**
+ * Custom node: a colored neuron with the label printed *underneath* the
+ * circle so the graph reads like a mind-map / synapse diagram.
+ */
+type NeuronData = {
+  label: string;
+  color: string;
+  radius: number;
+};
+
+function NeuronNode({ data, selected }: NodeProps<Node<NeuronData>>) {
+  const { label, color, radius } = data;
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 4,
+        pointerEvents: "auto",
+      }}
+    >
+      <div
+        style={{
+          width: radius * 2,
+          height: radius * 2,
+          borderRadius: "9999px",
+          background: `radial-gradient(circle at 30% 30%, ${color}EE 0%, ${color}88 60%, ${color}22 100%)`,
+          border: `1px solid ${selected ? "#fff" : color}`,
+          boxShadow: selected
+            ? `0 0 24px ${color}, 0 0 8px #fff`
+            : `0 0 14px ${color}66, inset 0 0 8px ${color}33`,
+          transition: "box-shadow 120ms ease",
+        }}
+      />
+      <div
+        style={{
+          fontSize: 9,
+          color: "#e4e4e7",
+          maxWidth: 110,
+          lineHeight: 1.1,
+          textAlign: "center",
+          textShadow: "0 0 4px #000, 0 0 4px #000",
+          padding: "0 2px",
+          pointerEvents: "none",
+        }}
+      >
+        {label}
+      </div>
+      {/* Hidden handles so ReactFlow knows where to anchor edges. */}
+      <Handle type="source" position={Position.Right} style={{ opacity: 0, top: radius, left: radius * 2 }} />
+      <Handle type="target" position={Position.Left}  style={{ opacity: 0, top: radius, left: 0 }} />
+    </div>
+  );
+}
+
+const nodeTypes = { neuron: NeuronNode };
+
+/**
+ * Force-directed (neural-network style) layout via d3-force.
+ *
+ * - Nodes are circular and sized by degree (how connected they are).
+ * - Edges are straight lines so the graph reads like a synapse map rather
+ *   than the previous tidy left-to-right Dagre layout.
+ * - Layout runs once per data/filter change with 240 ticks (synchronous —
+ *   instant for graphs up to a few hundred nodes).
+ */
+function layout(
+  data: GraphDump | undefined,
+  hidden: Set<string>,
+): { nodes: Node[]; edges: Edge[]; nodeIndex: Map<string, GraphNode> } {
+  const empty = { nodes: [] as Node[], edges: [] as Edge[], nodeIndex: new Map() };
+  if (!data) return empty;
+
+  const visibleNodes = data.nodes.filter((n) => !hidden.has(n.label || "Topic"));
+  const visibleIds = new Set(visibleNodes.map((n) => n.id));
+  const visibleEdges = data.edges.filter(
+    (e) => visibleIds.has(e.src) && visibleIds.has(e.dst),
+  );
+  if (visibleNodes.length === 0) return empty;
+
+  // Compute node degree → radius scale.
+  const degree = new Map<string, number>();
+  for (const e of visibleEdges) {
+    degree.set(e.src, (degree.get(e.src) ?? 0) + 1);
+    degree.set(e.dst, (degree.get(e.dst) ?? 0) + 1);
+  }
+  const maxDeg = Math.max(1, ...Array.from(degree.values()));
+
+  type Sim = SimulationNodeDatum & { id: string };
+  const simNodes: Sim[] = visibleNodes.map((n) => ({ id: n.id }));
+  const idToIdx = new Map(simNodes.map((n, i) => [n.id, i]));
+  const simLinks = visibleEdges.map((e) => ({
+    source: idToIdx.get(e.src)!,
+    target: idToIdx.get(e.dst)!,
+  }));
+
+  // Spread nodes initially on a circle so the simulation has somewhere to go.
+  const r0 = Math.max(120, Math.sqrt(simNodes.length) * 40);
+  simNodes.forEach((n, i) => {
+    const angle = (i / simNodes.length) * 2 * Math.PI;
+    n.x = Math.cos(angle) * r0;
+    n.y = Math.sin(angle) * r0;
+  });
+
+  const sim = forceSimulation(simNodes)
+    .force("charge", forceManyBody().strength(CHARGE))
+    .force("center", forceCenter(0, 0))
+    .force(
+      "link",
+      forceLink(simLinks).distance(LINK_DIST).strength(0.7),
+    )
+    .force(
+      "collide",
+      forceCollide()
+        .radius((d) => {
+          const id = (d as Sim).id;
+          const deg = degree.get(id) ?? 0;
+          return BASE_RADIUS + (MAX_RADIUS - BASE_RADIUS) * (deg / maxDeg) + 6;
+        })
+        .iterations(2),
+    )
+    .stop();
+
+  for (let i = 0; i < 240; i++) sim.tick();
+
+  const idx = new Map<string, GraphNode>();
+  const nodes: Node[] = visibleNodes.map((d, i) => {
+    idx.set(d.id, d);
+    const sn = simNodes[i];
+    const deg = degree.get(d.id) ?? 0;
+    const radius =
+      BASE_RADIUS + (MAX_RADIUS - BASE_RADIUS) * (deg / maxDeg);
+    const display = nodeDisplay(d);
+    const color = labelColors[d.label] || "#3f3f46";
+    return {
+      id: d.id,
+      type: "neuron",
+      data: { label: display, color, radius } as NeuronData,
+      position: { x: (sn.x ?? 0) - radius, y: (sn.y ?? 0) - radius },
+    } as Node;
+  });
+
+  const edges: Edge[] = visibleEdges.map((e, i) => ({
+    id: `e${i}`,
+    source: e.src,
+    target: e.dst,
+    label: e.rel,
+    type: "straight",
+    animated: false,
+    style: { stroke: "#52525b", strokeWidth: 0.8, opacity: 0.55 },
+    labelStyle: { fontSize: 8, fill: "#71717a" },
+    labelBgStyle: { fill: "transparent" },
+    labelShowBg: false,
+  }));
+
+  return { nodes, edges, nodeIndex: idx };
 }
 
 export function ContextGraph() {
@@ -169,7 +337,6 @@ export function ContextGraph() {
 
   return (
     <div className="h-full w-full relative">
-      {/* Top-right action stack */}
       <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1">
         <button
           onClick={rebuild}
@@ -187,7 +354,6 @@ export function ContextGraph() {
         )}
       </div>
 
-      {/* Type-filter legend (top-left, scrollable on small screens) */}
       <div className="absolute top-2 left-2 z-10 flex flex-wrap gap-1 max-w-[60%]">
         {presentTypes.map((t) => {
           const off = hidden.has(t);
@@ -217,127 +383,64 @@ export function ContextGraph() {
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        nodeTypes={nodeTypes}
         onNodeClick={(_, n) => {
           const orig = nodeIndex.get(n.id);
           if (orig) setSelected(orig);
         }}
         minZoom={0.1}
-        maxZoom={2}
+        maxZoom={3}
         nodesDraggable
         nodesConnectable={false}
         elementsSelectable
         fitView
-        fitViewOptions={{ padding: 0.18 }}
+        fitViewOptions={{ padding: 0.25 }}
         proOptions={{ hideAttribution: true }}
+        defaultEdgeOptions={{ type: "straight" }}
+        style={{ background: "#06060a" }}
       >
-        <Background gap={24} color="#1f1f23" />
+        <Background gap={28} color="#0f0f14" />
         <Controls position="bottom-right" showInteractive={false} />
         <MiniMap
           pannable
           zoomable
-          maskColor="rgba(0,0,0,.55)"
-          nodeColor={(n) => (n.style?.background as string) || "#3f3f46"}
-          style={{ background: "#0a0a0c" }}
+          maskColor="rgba(0,0,0,.7)"
+          nodeColor={(n) => {
+            const orig = nodeIndex.get(n.id);
+            return orig ? (labelColors[orig.label] || "#3f3f46") : "#3f3f46";
+          }}
+          style={{ background: "#06060a" }}
         />
       </ReactFlow>
 
       {selected && (
-        <NodeDetail node={selected} onClose={() => setSelected(null)} />
+        <NodeDetail
+          node={selected}
+          onClose={() => setSelected(null)}
+          onMutate={async () => {
+            await mutate();
+            setSelected(null);
+          }}
+        />
       )}
     </div>
   );
 }
 
-function layout(
-  data: GraphDump | undefined,
-  hidden: Set<string>,
-): { nodes: Node[]; edges: Edge[]; nodeIndex: Map<string, GraphNode> } {
-  const empty = { nodes: [] as Node[], edges: [] as Edge[], nodeIndex: new Map() };
-  if (!data) return empty;
-
-  // Filter out hidden types and orphan edges.
-  const visibleNodes = data.nodes.filter((n) => !hidden.has(n.label || "Topic"));
-  const visibleIds = new Set(visibleNodes.map((n) => n.id));
-  const visibleEdges = data.edges.filter(
-    (e) => visibleIds.has(e.src) && visibleIds.has(e.dst),
-  );
-
-  if (visibleNodes.length === 0) return empty;
-
-  // Dagre layout — left-to-right reads better for a knowledge graph.
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({
-    rankdir: "LR",
-    nodesep: 28,
-    ranksep: 80,
-    edgesep: 16,
-    marginx: 40,
-    marginy: 40,
-  });
-  for (const n of visibleNodes) {
-    g.setNode(n.id, { width: NODE_W, height: NODE_H });
-  }
-  for (const e of visibleEdges) {
-    g.setEdge(e.src, e.dst);
-  }
-  dagre.layout(g);
-
-  const idx = new Map<string, GraphNode>();
-  const nodes: Node[] = visibleNodes.map((d) => {
-    idx.set(d.id, d);
-    const p = g.node(d.id);
-    const display = nodeDisplay(d);
-    return {
-      id: d.id,
-      data: { label: display },
-      position: { x: (p?.x ?? 0) - NODE_W / 2, y: (p?.y ?? 0) - NODE_H / 2 },
-      sourcePosition: Position.Right,
-      targetPosition: Position.Left,
-      style: {
-        background: labelColors[d.label] || "#3f3f46",
-        color: "white",
-        border: "1px solid rgba(255,255,255,.12)",
-        borderRadius: 10,
-        padding: "6px 10px",
-        fontSize: 11,
-        lineHeight: "1.2",
-        width: NODE_W,
-        height: NODE_H,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        textAlign: "center",
-        fontWeight: 500,
-        boxShadow: "0 1px 2px rgba(0,0,0,.4)",
-        cursor: "pointer",
-      },
-    };
-  });
-
-  const edges: Edge[] = visibleEdges.map((e, i) => ({
-    id: `e${i}`,
-    source: e.src,
-    target: e.dst,
-    label: e.rel,
-    type: "smoothstep",
-    style: { stroke: "#3f3f46", strokeWidth: 1 },
-    labelStyle: { fontSize: 9, fill: "#a1a1aa" },
-    labelBgStyle: { fill: "#0a0a0c", fillOpacity: 0.9 },
-    labelBgPadding: [4, 2],
-  }));
-
-  return { nodes, edges, nodeIndex: idx };
-}
-
 function NodeDetail({
   node,
   onClose,
+  onMutate,
 }: {
   node: GraphNode;
   onClose: () => void;
+  onMutate: () => void | Promise<void>;
 }) {
-  // Close on escape.
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(node.name);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -346,9 +449,49 @@ function NodeDetail({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
   const props = Object.entries(node.props || {})
     .filter(([k]) => !["id", "user_id", "name"].includes(k))
     .filter(([, v]) => v !== null && v !== undefined && v !== "");
+
+  const save = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === node.name) {
+      setEditing(false);
+      setName(node.name);
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/context/graph/node/${node.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: trimmed }),
+      });
+      await onMutate();
+    } catch (e) {
+      alert(`Rename failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+      setEditing(false);
+    }
+  };
+
+  const del = async () => {
+    if (!confirm(`Delete "${node.name}" from your identity graph? This removes the node and all its connections.`)) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/context/graph/node/${node.id}`, { method: "DELETE" });
+      await onMutate();
+    } catch (e) {
+      alert(`Delete failed: ${(e as Error).message}`);
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="absolute bottom-3 left-3 right-3 sm:right-auto sm:bottom-3 sm:max-w-md z-20 rounded-xl border border-[var(--line)] bg-[var(--bg-elev2)] shadow-2xl overflow-hidden">
@@ -365,16 +508,62 @@ function NodeDetail({
         >
           {node.label}
         </div>
-        <div className="flex-1 text-sm font-medium leading-snug">
-          {node.name}
+        <div className="flex-1 min-w-0">
+          {editing ? (
+            <input
+              ref={inputRef}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+                if (e.key === "Escape") { setEditing(false); setName(node.name); }
+              }}
+              disabled={busy}
+              className="w-full bg-transparent border-b border-[var(--accent)] text-sm font-medium leading-snug outline-none disabled:opacity-50"
+            />
+          ) : (
+            <div className="text-sm font-medium leading-snug break-words">{node.name}</div>
+          )}
         </div>
-        <button
-          onClick={onClose}
-          className="text-[var(--fg-mute)] hover:text-white shrink-0"
-          aria-label="Close"
-        >
-          <X size={14} />
-        </button>
+        <div className="flex items-center gap-0.5 shrink-0">
+          {editing ? (
+            <button
+              onClick={() => void save()}
+              disabled={busy}
+              className="p-1 text-emerald-400 hover:text-white disabled:opacity-40"
+              title="Save"
+              aria-label="Save"
+            >
+              <Check size={14} />
+            </button>
+          ) : (
+            <button
+              onClick={() => setEditing(true)}
+              disabled={busy}
+              className="p-1 text-[var(--fg-mute)] hover:text-white disabled:opacity-40"
+              title="Rename"
+              aria-label="Rename"
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          <button
+            onClick={() => void del()}
+            disabled={busy}
+            className="p-1 text-[var(--fg-mute)] hover:text-red-400 disabled:opacity-40"
+            title="Delete node + its edges"
+            aria-label="Delete"
+          >
+            <Trash2 size={13} />
+          </button>
+          <button
+            onClick={onClose}
+            className="p-1 text-[var(--fg-mute)] hover:text-white shrink-0"
+            aria-label="Close"
+          >
+            <X size={14} />
+          </button>
+        </div>
       </div>
       {props.length > 0 && (
         <div className="px-3 py-2 text-xs space-y-1 max-h-48 overflow-auto">

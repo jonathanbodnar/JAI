@@ -20,11 +20,15 @@ class Settings(BaseSettings):
     openrouter_app_url: str = "https://jai.local"
 
     # Model registry (role → OpenRouter slug). Override in env.
-    jai_model_orchestrator: str = "qwen/qwen3.7-max"
+    # Orchestrator is the per-turn router that runs on EVERY message; keep it
+    # snappy. Fast Gemini / Claude Haiku-class slugs on OpenRouter are ~5x
+    # faster than Qwen Max for routing-style structured output. Use
+    # `jai_model_orchestrator` to override if you want a heavier brain.
+    jai_model_orchestrator: str = "google/gemini-2.0-flash-001"
     jai_model_reflection: str = "moonshotai/kimi-k2.6"
     jai_model_strategy: str = "deepseek/deepseek-v4-pro"
     jai_model_skill_builder: str = "qwen/qwen3.7-max"
-    jai_model_fast: str = "deepseek/deepseek-v4-flash:free"
+    jai_model_fast: str = "google/gemini-2.0-flash-001"
     jai_model_embed: str = "openai/text-embedding-3-large"
 
     # --- Speech ---

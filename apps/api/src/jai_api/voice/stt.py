@@ -28,12 +28,30 @@ class STT:
     async def transcribe(self, audio_bytes: bytes, *, mime: str = "audio/webm") -> str:
         if not self._client:
             raise RuntimeError("STT not configured (set GROQ_API_KEY)")
-        file_obj = ("audio.webm", io.BytesIO(audio_bytes), mime)
-        res = await self._client.audio.transcriptions.create(
-            file=file_obj,
-            model="whisper-large-v3-turbo",
-            response_format="text",
-            temperature=0,
-        )
-        # SDK returns either a Transcription object or raw text depending on format
+        # Groq inspects both the filename extension AND the bytes — wrong
+        # extension can flip a valid file into a 400. Match extension to mime.
+        ext = {
+            "audio/webm": "webm",
+            "audio/ogg": "ogg",
+            "audio/mp4": "mp4",
+            "audio/mpeg": "mp3",
+            "audio/wav": "wav",
+        }.get(mime, "webm")
+        file_obj = (f"audio.{ext}", io.BytesIO(audio_bytes), mime)
+        try:
+            res = await self._client.audio.transcriptions.create(
+                file=file_obj,
+                model="whisper-large-v3-turbo",
+                response_format="text",
+                temperature=0,
+            )
+        except Exception as e:
+            log.warning(
+                "stt.api_error",
+                error=str(e),
+                bytes=len(audio_bytes),
+                mime=mime,
+                head=audio_bytes[:8].hex(),
+            )
+            raise
         return res if isinstance(res, str) else getattr(res, "text", str(res))

@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { api } from "@/lib/api";
-import { Pin, Plus, Search } from "lucide-react";
+import { Pin, Plus, Search, Trash2, Archive } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useRealtimeRevalidate } from "@/lib/realtime";
 
@@ -187,6 +187,8 @@ function Composer({ onCreated }: { onCreated: () => void }) {
 
 function NoteCard({ n, onMutate }: { n: Note; onMutate: () => void }) {
   const bg = colorClass(n.color || "default");
+  const [busy, setBusy] = useState(false);
+
   const togglePin = async () => {
     await api(`/notes/${n.id}`, {
       method: "PATCH",
@@ -194,10 +196,40 @@ function NoteCard({ n, onMutate }: { n: Note; onMutate: () => void }) {
     });
     onMutate();
   };
+
+  const remove = async () => {
+    if (busy) return;
+    const preview = (n.title || n.body || "").slice(0, 60).trim() || "this note";
+    if (!confirm(`Delete "${preview}"? This can't be undone.`)) return;
+    setBusy(true);
+    try {
+      await api(`/notes/${n.id}`, { method: "DELETE" });
+      onMutate();
+    } catch (e) {
+      alert(`Delete failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archive = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api(`/notes/${n.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ archived: !n.archived }),
+      });
+      onMutate();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div
       className={cn(
-        "rounded-xl border border-[var(--line)] p-3 text-[14px] leading-snug",
+        "group rounded-xl border border-[var(--line)] p-3 text-[14px] leading-snug relative",
         bg,
       )}
     >
@@ -246,6 +278,26 @@ function NoteCard({ n, onMutate }: { n: Note; onMutate: () => void }) {
           ))}
         </div>
       )}
+      <div className="mt-2 -mb-1 flex justify-end gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={archive}
+          disabled={busy}
+          className="p-1 rounded text-[var(--fg-mute)] hover:text-white disabled:opacity-40"
+          title={n.archived ? "Unarchive" : "Archive"}
+          aria-label="Archive"
+        >
+          <Archive size={13} />
+        </button>
+        <button
+          onClick={remove}
+          disabled={busy}
+          className="p-1 rounded text-[var(--fg-mute)] hover:text-red-400 disabled:opacity-40"
+          title="Delete"
+          aria-label="Delete"
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
     </div>
   );
 }
