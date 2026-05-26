@@ -54,6 +54,12 @@ const FILE_BY_LANG = {
 const ENV_FILE = "/workspace/.env.json";
 const PIP_MARKER = "/workspace/.pip-installed";
 const NPM_MARKER = "/workspace/.npm-installed";
+// Bump this whenever we change the container image / instance_type so
+// existing containers get destroyed and recreated on next /run. Otherwise
+// the user's persistent container keeps running on the old config until
+// it idles out (~10 min).
+const CONTAINER_VERSION = "v3-basic-python";
+const VERSION_MARKER = "/workspace/.container-version";
 // Install Python packages to an explicit /workspace path instead of the
 // system site-packages. The Cloudflare base image runs as a non-root user
 // and uses a python-build-standalone distribution, so `pip install`
@@ -62,15 +68,16 @@ const NPM_MARKER = "/workspace/.npm-installed";
 const PIP_TARGET = "/workspace/.pylibs";
 
 // Packages JAI skills routinely need. Installed once per container
-// instance (cached via marker file). Keep the list lean — broader sets
-// stretch first-run install time past the user's patience.
+// instance (cached via marker file). Deliberately lean: anything heavy
+// (e.g. supabase-py with its postgrest+gotrue+httpx[http2] tree)
+// blows past the container's RAM budget during install. For Supabase
+// we hit the REST API via httpx instead — same auth, zero install.
 const PIP_PACKAGES = [
   "httpx",
   "google-api-python-client",
   "google-auth",
   "google-auth-oauthlib",
   "google-auth-httplib2",
-  "supabase",
   "python-dateutil",
 ];
 
@@ -178,12 +185,13 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
     await sb.mkdir("/workspace", { recursive: true });
 
     // Pre-flight: make sure the container actually has the runtime we
-    // need. Cloudflare DO containers persist across requests, so if the
-    // container booted under an old image variant (e.g. pre-python),
-    // every subsequent /run sees the stale binary set. Destroy + recreate
-    // when that happens.
-    const needsFresh = await containerLacksRuntime(sb, body.language);
-    if (needsFresh) {
+    // need AND is on the current config version. Cloudflare DO containers
+    // persist across requests, so if the container booted under an old
+    // image / instance_type, every subsequent /run sees the stale config
+    // until it idles out. Destroy + recreate when either signal is off.
+    const lacksRuntime = await containerLacksRuntime(sb, body.language);
+    const wrongVersion = lacksRuntime ? false : await containerIsStale(sb);
+    if (lacksRuntime || wrongVersion) {
       try {
         await sb.destroy();
       } catch {
@@ -192,6 +200,14 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
       sb = getSandbox(env.Sandbox, body.user_id);
       // Re-mkdir; the new container has a fresh filesystem.
       await sb.mkdir("/workspace", { recursive: true });
+    }
+
+    // Stamp the version into the (possibly fresh) container so we can
+    // detect stale versions on later runs.
+    try {
+      await sb.writeFile(VERSION_MARKER, CONTAINER_VERSION);
+    } catch {
+      /* ignore — non-critical */
     }
 
     // Env vars come via a JSON file so OAuth blobs / multi-line values don't
@@ -267,7 +283,7 @@ async function ensureDepsInstalled(
       `mkdir -p ${PIP_TARGET} && ` +
       `python3 -m pip install --no-cache-dir --disable-pip-version-check ` +
       `--target ${PIP_TARGET} --upgrade ${pkgs} && ` +
-      `PYTHONPATH=${PIP_TARGET} python3 -c 'import google.oauth2.credentials, googleapiclient.discovery, httpx; print("self-check OK")' && ` +
+      `PYTHONPATH=${PIP_TARGET} python3 -c 'import httpx, google.oauth2.credentials, googleapiclient.discovery; print("self-check OK")' && ` +
       `touch ${PIP_MARKER}`;
     return await runInstallProcess(sb, `bash -lc ${shellQuote(cmd)}`, "pip install");
   }
@@ -282,6 +298,27 @@ async function ensureDepsInstalled(
   }
 
   return "";
+}
+
+// Check whether the container's stamped version matches the worker's
+// current expected version. Returns true if stamps differ (or there's no
+// stamp at all from a brand-new container — but in that case
+// containerLacksRuntime already short-circuited).
+async function containerIsStale(
+  sb: ReturnType<typeof getSandbox>,
+): Promise<boolean> {
+  try {
+    const res = await sb.exec(`cat ${VERSION_MARKER} 2>/dev/null || true`, {
+      timeout: 5_000,
+    });
+    const stamped = (res.stdout ?? "").trim();
+    // If the file is missing/empty, we don't know what version it is —
+    // treat as stale to be safe. New containers will be re-stamped right
+    // after the destroy+recreate so this only fires once per container.
+    return stamped !== CONTAINER_VERSION;
+  } catch {
+    return true;
+  }
 }
 
 // Verify the container has the language runtime we expect. Used to detect

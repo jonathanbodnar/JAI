@@ -16,7 +16,11 @@
       // Skills install extra packages on first run via the prelude in
       // src/index.ts (cached afterwards via marker file).
       "image": "docker.io/cloudflare/sandbox:0.7.21-python",
-      "instance_type": "lite",
+      // `lite` (256 MiB) gets OOM-killed by pip installs of anything
+      // chunky (supabase, postgrest, langchain, etc.). `basic` (1 GiB,
+      // 4 GB disk) is enough headroom for the package set JAI skills
+      // typically need.
+      "instance_type": "basic",
       "max_instances": 8
     }
   ],

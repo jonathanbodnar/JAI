@@ -78,18 +78,32 @@ PLATFORM CREDENTIALS (always injected — NEVER ask for these, NEVER list them a
   JAI_BACKEND_URL    — JAI's API base URL
 
 QUERYING JAI's DATA DIRECTLY (prefer this for any "what are my projects / tasks / progress" request):
-```python
-import os, json
-from supabase import create_client
+Use Supabase's REST API via httpx — do NOT use the `supabase` Python
+package, it pulls heavy deps that blow the container memory budget.
 
-sb = create_client(os.environ["JAI_SUPABASE_URL"], os.environ["JAI_SUPABASE_KEY"])
+```python
+import os, json, httpx
+
+SUPA = os.environ["JAI_SUPABASE_URL"].rstrip("/") + "/rest/v1"
+HEAD = {
+    "apikey": os.environ["JAI_SUPABASE_KEY"],
+    "Authorization": f"Bearer {os.environ['JAI_SUPABASE_KEY']}",
+}
 uid = os.environ["JAI_USER_ID"]
 
-tasks    = sb.table("tasks").select("*").eq("user_id", uid).execute().data
-notes    = sb.table("notes").select("*").eq("user_id", uid).execute().data
-docs     = sb.table("documents").select("title,status,created_at").eq("user_id", uid).execute().data
-skills   = sb.table("skills").select("title,run_count,last_run_at,last_run_status").eq("user_id", uid).execute().data
-runs     = sb.table("skill_runs").select("*").eq("user_id", uid).order("started_at", desc=True).limit(20).execute().data
+def q(table, params=""):
+    url = f"{SUPA}/{table}?user_id=eq.{uid}{('&' + params) if params else ''}"
+    r = httpx.get(url, headers=HEAD, timeout=15.0)
+    r.raise_for_status()
+    return r.json()
+
+tasks   = q("tasks", "select=*&order=created_at.desc")
+notes   = q("notes", "select=id,title,body,updated_at&archived=eq.false")
+docs    = q("documents", "select=title,status,created_at")
+skills  = q("skills", "select=title,run_count,last_run_at,last_run_status&is_active=eq.true")
+runs    = q("skill_runs", "select=*&order=started_at.desc&limit=20")
+
+print(json.dumps({"status":"ok","result":{"tasks":tasks, "skills":skills}}))
 ```
 Use this whenever the user asks about their projects, progress, activity, tasks, or any JAI data.
 Tables available: tasks, task_lists, notes, documents, messages, skills, skill_runs,
