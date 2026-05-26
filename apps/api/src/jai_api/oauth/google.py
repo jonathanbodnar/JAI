@@ -23,24 +23,40 @@ Service = Literal["gmail", "calendar", "drive"]
 
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
+_USERINFO_URI = "https://openidconnect.googleapis.com/v1/userinfo"
 
 _SCOPES: dict[Service, list[str]] = {
     "gmail": [
+        "openid",
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/userinfo.email",
     ],
     "calendar": [
+        "openid",
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/userinfo.email",
     ],
     "drive": [
+        "openid",
         "https://www.googleapis.com/auth/drive.readonly",
         "https://www.googleapis.com/auth/userinfo.email",
     ],
 }
+
+
+def fetch_userinfo(access_token: str) -> dict:
+    """Return Google userinfo (email, name, picture, sub) for an access token."""
+    resp = requests.get(
+        _USERINFO_URI,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"google userinfo failed ({resp.status_code}): {resp.text}")
+    return resp.json()
 
 
 def _serializer() -> URLSafeSerializer:
@@ -73,7 +89,11 @@ def auth_url(*, user_id: str, service: Service, return_to: str) -> str:
         "redirect_uri": redirect_uri,
         "scope": " ".join(_SCOPES[service]),
         "access_type": "offline",
-        "prompt": "consent",
+        # `select_account` makes Google show the account picker every time,
+        # so adding a 2nd / 3rd Gmail account works even when the browser
+        # is already signed in to a Google account. `consent` forces issuing
+        # a refresh_token.
+        "prompt": "select_account consent",
         "include_granted_scopes": "true",
         "state": state,
     }
