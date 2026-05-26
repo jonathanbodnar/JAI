@@ -10,6 +10,7 @@ import { Settings, Trash2 } from "lucide-react";
 import { MessageList, type Message, type Step } from "./MessageList";
 import { Composer } from "./Composer";
 import { LivingKPIs } from "./LivingKPIs";
+import { ActivityRibbon } from "./ActivityRibbon";
 import { cn } from "@/lib/cn";
 
 const CHAT_KEY = "jai.chat.messages.v1";
@@ -466,6 +467,11 @@ export function ChatView() {
 
       {/* Message List */}
       <MessageList messages={messages} thinking={thinking} liveSteps={liveSteps} onSend={send} />
+
+      {/* Faded "what we just worked on" ribbon — desktop only, overlaid
+          above the composer in the bottom-left. Flows as skills run,
+          tasks complete, notes get created, KPIs tick. */}
+      <ActivityRibbon />
 
       {/* Centered Pill Input Pack */}
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-[#131314] via-[#131314]/90 to-transparent pt-12 pb-24 md:pb-6 z-10 pointer-events-none">

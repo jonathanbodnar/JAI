@@ -14,6 +14,7 @@ from .graph.builder import build_graph, close_graph
 from .mcp_server.context import set_user_id
 from .mcp_server.server import build_mcp_server, expected_token
 from .routes import (
+    activity,
     audit,
     chat,
     context_ingest,
@@ -86,6 +87,7 @@ app.include_router(context_ingest.router, prefix="/context", tags=["context"])
 app.include_router(schedule.router, prefix="/schedule", tags=["schedule"])
 app.include_router(data_sources.router, prefix="/datasources", tags=["datasources"])
 app.include_router(kpis.router, prefix="/kpis", tags=["kpis"])
+app.include_router(activity.router, prefix="/activity", tags=["activity"])
 
 
 @app.get("/health")
