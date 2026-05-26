@@ -11,15 +11,18 @@ Skills reconstruct credentials from this blob via
 
 from __future__ import annotations
 
-import json
 from typing import Literal
+from urllib.parse import urlencode
 
-from google_auth_oauthlib.flow import Flow
+import requests
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from ..config import get_settings
 
 Service = Literal["gmail", "calendar", "drive"]
+
+_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+_TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 _SCOPES: dict[Service, list[str]] = {
     "gmail": [
@@ -45,35 +48,36 @@ def _serializer() -> URLSafeSerializer:
     return URLSafeSerializer(s.jai_credentials_key or "dev-only-state-secret", salt="google-oauth")
 
 
-def _flow(service: Service) -> Flow:
+def _require_client() -> tuple[str, str, str]:
     s = get_settings()
     if not (s.google_oauth_client_id and s.google_oauth_client_secret):
         raise RuntimeError("GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET not set")
-    return Flow.from_client_config(
-        {
-            "web": {
-                "client_id": s.google_oauth_client_id,
-                "client_secret": s.google_oauth_client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [s.google_oauth_redirect_uri],
-            }
-        },
-        scopes=_SCOPES[service],
-        redirect_uri=s.google_oauth_redirect_uri,
-    )
+    if not s.google_oauth_redirect_uri:
+        raise RuntimeError("GOOGLE_OAUTH_REDIRECT_URI not set")
+    return s.google_oauth_client_id, s.google_oauth_client_secret, s.google_oauth_redirect_uri
 
 
 def auth_url(*, user_id: str, service: Service, return_to: str) -> str:
-    flow = _flow(service)
+    """Build a Google OAuth authorization URL.
+
+    Uses the plain confidential web-client flow (no PKCE) — `client_secret`
+    on the token exchange is enough to identify us. We previously relied on
+    `google_auth_oauthlib.Flow` which auto-injects PKCE and then 500s on the
+    callback because the verifier isn't persisted across the redirect.
+    """
+    client_id, _client_secret, redirect_uri = _require_client()
     state = _serializer().dumps({"u": user_id, "s": service, "r": return_to})
-    url, _ = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",   # always issue refresh_token
-        include_granted_scopes="true",
-        state=state,
-    )
-    return url
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": " ".join(_SCOPES[service]),
+        "access_type": "offline",
+        "prompt": "consent",
+        "include_granted_scopes": "true",
+        "state": state,
+    }
+    return f"{_AUTH_URI}?{urlencode(params)}"
 
 
 def decode_state(state: str) -> dict:
@@ -84,17 +88,40 @@ def decode_state(state: str) -> dict:
 
 
 def exchange_code(*, service: Service, code: str) -> dict:
-    flow = _flow(service)
-    flow.fetch_token(code=code)
-    c = flow.credentials
+    """Exchange an authorization code for tokens via direct POST to Google.
+
+    Sidesteps `google_auth_oauthlib`'s stateful PKCE flow which fails in
+    this stateless request/redirect model.
+    """
+    client_id, client_secret, redirect_uri = _require_client()
+    resp = requests.post(
+        _TOKEN_URI,
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+        },
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"google token exchange failed ({resp.status_code}): {resp.text}")
+    data = resp.json()
+    scopes = (data.get("scope") or "").split() or list(_SCOPES[service])
+    expires_in = data.get("expires_in")
+    expiry = None
+    if expires_in:
+        from datetime import datetime, timedelta, timezone
+        expiry = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat()
     return {
-        "access_token": c.token,
-        "refresh_token": c.refresh_token,
-        "token_uri": c.token_uri,
-        "client_id": c.client_id,
-        "client_secret": c.client_secret,
-        "scopes": list(c.scopes or []),
-        "expiry": c.expiry.isoformat() if c.expiry else None,
+        "access_token": data.get("access_token"),
+        "refresh_token": data.get("refresh_token"),
+        "token_uri": _TOKEN_URI,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scopes": scopes,
+        "expiry": expiry,
     }
 
 

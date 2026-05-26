@@ -58,8 +58,10 @@ export function NotesView() {
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto pb-28">
-        <div className="max-w-4xl mx-auto px-4 py-4 space-y-6">
-          <Composer onCreated={() => mutate("/notes")} />
+        <div className="max-w-7xl mx-auto px-6 py-6 space-y-8">
+          <div className="max-w-2xl mx-auto">
+            <Composer onCreated={() => mutate("/notes")} />
+          </div>
 
           {isLoading && (
             <div className="flex justify-center py-12">
@@ -264,12 +266,12 @@ function NoteCard({ n, onMutate }: { n: Note; onMutate: () => void }) {
   return (
     <div
       className={cn(
-        "group rounded-2xl border border-[#2d2f31]/60 p-4 text-[14px] leading-relaxed relative hover:border-zinc-700 transition-all duration-200 shadow-sm",
+        "group rounded-2xl border border-[#2d2f31]/60 p-5 text-[15px] leading-relaxed relative hover:border-zinc-600 transition-all duration-200 shadow-md hover:shadow-lg",
         bg,
       )}
     >
       <div className="flex items-start gap-3">
-        {n.title && <div className="font-bold text-white flex-1 break-words leading-snug">{n.title}</div>}
+        {n.title && <div className="font-bold text-white flex-1 break-words leading-snug text-[16px]">{n.title}</div>}
         {!n.title && <div className="flex-1" />}
         <button
           onClick={togglePin}
@@ -301,7 +303,7 @@ function NoteCard({ n, onMutate }: { n: Note; onMutate: () => void }) {
           ))}
         </ul>
       ) : n.body ? (
-        <div className="mt-1.5 whitespace-pre-wrap break-words text-zinc-300 leading-relaxed font-medium text-[13.5px]">
+        <div className="mt-2 whitespace-pre-wrap break-words text-zinc-200 leading-relaxed font-normal text-[14.5px]">
           {n.body}
         </div>
       ) : null}

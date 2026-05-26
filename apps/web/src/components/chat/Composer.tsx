@@ -1,6 +1,6 @@
 "use client";
 import { useState, type KeyboardEvent, useRef, useEffect } from "react";
-import { Send, Mic, Sparkles } from "lucide-react";
+import { Send, Mic } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 export function Composer({
@@ -132,12 +132,6 @@ export function Composer({
           )}
         </div>
       </div>
-
-      {/* Gemini-style elegant tiny disclaimer footer */}
-      <p className="text-[11px] text-[#8e918f] text-center mt-2 font-medium tracking-normal flex items-center justify-center gap-1">
-        <Sparkles size={11} className="text-[var(--accent)] shrink-0 opacity-80" />
-        JAI can make mistakes. Verify important information.
-      </p>
     </div>
   );
 }

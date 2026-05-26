@@ -57,14 +57,14 @@ input, textarea {
 }
 .ptt-pulse { animation: ptt-pulse 1.6s cubic-bezier(0.25, 0, 0, 1) infinite; }
 
-/* card masonry for notes */
+/* card masonry for notes — Google Keep desktop style */
 .keep-masonry {
-  column-count: 1;
+  column-width: 240px;
   column-gap: 16px;
 }
-@media (min-width: 640px)  { .keep-masonry { column-count: 2; } }
-@media (min-width: 1024px) { .keep-masonry { column-count: 3; } }
-@media (min-width: 1280px) { .keep-masonry { column-count: 4; } }
+@media (min-width: 1280px) {
+  .keep-masonry { column-width: 260px; }
+}
 .keep-masonry > * {
   break-inside: avoid;
   margin-bottom: 16px;

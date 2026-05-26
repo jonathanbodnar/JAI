@@ -5,6 +5,7 @@ export type ServerMsg =
   | { type: "user_transcript"; text: string }
   | { type: "assistant_delta"; text: string }
   | { type: "assistant_final"; text: string; role_used?: string }
+  | { type: "step"; node: string; label: string; detail?: string | null }
   | { type: "audio_chunk"; b64: string }
   | { type: "audio_done"; skipped?: boolean }
   | { type: "pong" }

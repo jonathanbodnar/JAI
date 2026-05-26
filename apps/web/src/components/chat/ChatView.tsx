@@ -5,7 +5,7 @@ import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
 import { api } from "@/lib/api";
 import Link from "next/link";
 import { Settings, Trash2, BrainCircuit } from "lucide-react";
-import { MessageList, type Message } from "./MessageList";
+import { MessageList, type Message, type Step } from "./MessageList";
 import { Composer } from "./Composer";
 import { cn } from "@/lib/cn";
 
@@ -43,6 +43,8 @@ export function ChatView() {
   const [connected, setConnected] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [liveSteps, setLiveSteps] = useState<Step[]>([]);
+  const liveStepsRef = useRef<Step[]>([]);
   const wsRef = useRef<ChatSocket | null>(null);
   const recRef = useRef<PressRecorder | null>(null);
   const playerRef = useRef<StreamingAudioPlayer | null>(null);
@@ -50,6 +52,20 @@ export function ChatView() {
   useEffect(() => {
     saveMessages(messages);
   }, [messages]);
+
+  useEffect(() => {
+    liveStepsRef.current = liveSteps;
+  }, [liveSteps]);
+
+  // Sidebar's "New chat" pill dispatches this event to wipe the current thread.
+  useEffect(() => {
+    const onNew = () => {
+      setMessages([]);
+      void api("/chat/reset", { method: "POST" }).catch(() => { /* ignore */ });
+    };
+    window.addEventListener("jai:new-chat", onNew);
+    return () => window.removeEventListener("jai:new-chat", onNew);
+  }, []);
 
   useEffect(() => {
     const sock = new ChatSocket({
@@ -63,12 +79,35 @@ export function ChatView() {
               { id: cryptoId(), role: "user", text: m.text },
             ]);
             setThinking(true);
+            setLiveSteps([]);
+            break;
+          case "step":
+            setLiveSteps((prev) => [
+              ...prev,
+              {
+                id: cryptoId(),
+                node: m.node,
+                label: m.label,
+                detail: m.detail ?? null,
+                done: true,
+              },
+            ]);
             break;
           case "assistant_final":
-            setMessages((prev) => [
-              ...prev,
-              { id: cryptoId(), role: "assistant", text: m.text, agent: m.role_used },
-            ]);
+            setMessages((prev) => {
+              const steps = liveStepsRef.current;
+              return [
+                ...prev,
+                {
+                  id: cryptoId(),
+                  role: "assistant",
+                  text: m.text,
+                  agent: m.role_used,
+                  steps: steps.length ? steps : undefined,
+                },
+              ];
+            });
+            setLiveSteps([]);
             setThinking(false);
             playerRef.current = new StreamingAudioPlayer("audio/mpeg");
             break;
@@ -97,6 +136,7 @@ export function ChatView() {
   const send = (text: string) => {
     if (!text.trim() || !wsRef.current) return;
     setMessages((prev) => [...prev, { id: cryptoId(), role: "user", text }]);
+    setLiveSteps([]);
     setThinking(true);
     wsRef.current.sendText(text);
   };
@@ -211,7 +251,7 @@ export function ChatView() {
       </header>
 
       {/* Message List */}
-      <MessageList messages={messages} thinking={thinking} onSend={send} />
+      <MessageList messages={messages} thinking={thinking} liveSteps={liveSteps} onSend={send} />
 
       {/* Centered Pill Input Pack */}
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-[#131314] via-[#131314]/90 to-transparent pt-12 pb-24 md:pb-6 z-10 pointer-events-none">

@@ -171,6 +171,45 @@ async def chat_ws(ws: WebSocket, user: CurrentUser = Depends(_ws_user)):
             pass
 
 
+def _summarize_delta(node_name: str, delta) -> str | None:
+    """Produce a short user-friendly description of what a node did."""
+    if not isinstance(delta, dict):
+        return None
+    try:
+        if node_name == "retrieve":
+            mem = delta.get("memory") or {}
+            mem0 = len(mem.get("mem0") or [])
+            qd = len(mem.get("qdrant") or [])
+            gr = len(mem.get("graph") or [])
+            bits: list[str] = []
+            if mem0: bits.append(f"{mem0} identity facts")
+            if qd: bits.append(f"{qd} embeddings")
+            if gr: bits.append(f"{gr} graph nodes")
+            return ", ".join(bits) or "No prior context found"
+        if node_name == "fast_intent":
+            if delta.get("final_text") and (delta.get("role_used", "") or "").startswith("builtin:"):
+                return f"Handled by {delta.get('role_used')}"
+            return None
+        if node_name == "orchestrator":
+            route = delta.get("route")
+            return f"Decided route → {route}" if route else None
+        if node_name == "skill":
+            sk = delta.get("skill_name") or delta.get("skill_id")
+            return f"Ran {sk}" if sk else None
+        if node_name == "tool":
+            t = delta.get("tool_name")
+            return f"Called {t}" if t else None
+        if node_name == "persist":
+            wrote = delta.get("persisted") or {}
+            if wrote:
+                bits = [f"{k}: {v}" for k, v in wrote.items() if v]
+                return ", ".join(bits) or None
+            return None
+    except Exception:
+        return None
+    return None
+
+
 def _sniff_audio_mime(buf: bytes) -> str:
     """Best-effort container detection from the first few bytes.
 
@@ -212,6 +251,19 @@ async def _primary_conversation_id(sb, user_id: str) -> str:
     return ins.data[0]["id"]
 
 
+_STEP_LABELS = {
+    "ingest": ("Reading your message", "Parsing intent & context"),
+    "fast_intent": ("Checking quick actions", "Matching against built-in patterns"),
+    "retrieve": ("Recalling memory", "Pulling identity facts, embeddings, graph"),
+    "orchestrator": ("Thinking", "Routing the response through the planner"),
+    "reflect": ("Reflecting", "Reviewing the answer for accuracy"),
+    "strategize": ("Strategizing", "Drafting a deeper plan"),
+    "tool": ("Calling a tool", "Routing to a connected integration"),
+    "skill": ("Running a skill", "Executing sandboxed code"),
+    "persist": ("Saving to memory", "Selectively writing durable facts"),
+}
+
+
 async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> None:
     config = {"configurable": {"thread_id": user.user_id}}
     state_input = {
@@ -239,9 +291,27 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
     final_text = ""
     role_used: str | None = None
     try:
-        result = await graph.app.ainvoke(state_input, config=config)
-        final_text = result.get("final_text") or "(no response)"
-        role_used = result.get("role_used")
+        # Stream node-level updates so the client can render "thinking steps"
+        # like Cursor. We still need the final state, so we accumulate it.
+        accumulated: dict = {}
+        async for update in graph.app.astream(state_input, config=config, stream_mode="updates"):
+            # update is {node_name: state_delta}
+            for node_name, delta in update.items():
+                label, detail = _STEP_LABELS.get(node_name, (node_name.replace("_", " ").title(), None))
+                extra = _summarize_delta(node_name, delta)
+                try:
+                    await ws.send_json({
+                        "type": "step",
+                        "node": node_name,
+                        "label": label,
+                        "detail": extra or detail,
+                    })
+                except Exception:
+                    pass
+                if isinstance(delta, dict):
+                    accumulated.update(delta)
+        final_text = (accumulated.get("final_text") or "").strip() or "(no response)"
+        role_used = accumulated.get("role_used")
     except Exception as e:
         log.exception("graph.invoke.failed", error=str(e))
         await ws.send_json({"type": "error", "message": f"graph failed: {e}"})

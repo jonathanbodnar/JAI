@@ -3,30 +3,41 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Sparkles, Copy, Check, ArrowUpRight, Flame, ClipboardList, Network, StickyNote } from "lucide-react";
+import { Sparkles, Copy, Check, ArrowUpRight, Flame, ClipboardList, Network, StickyNote, ChevronRight, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+
+export type Step = {
+  id: string;
+  node: string;
+  label: string;
+  detail?: string | null;
+  done: boolean;
+};
 
 export type Message = {
   id: string;
   role: "user" | "assistant";
   text: string;
   agent?: string;
+  steps?: Step[];
 };
 
 export function MessageList({
   messages,
   thinking,
+  liveSteps,
   onSend,
 }: {
   messages: Message[];
   thinking: boolean;
+  liveSteps?: Step[];
   onSend?: (text: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: "smooth" });
-  }, [messages, thinking]);
+  }, [messages, thinking, liveSteps]);
 
   return (
     <div ref={ref} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 pb-28">
@@ -37,7 +48,9 @@ export function MessageList({
         {messages.map((m) => (
           <Bubble key={m.id} m={m} />
         ))}
-        {thinking && <Thinking />}
+        {thinking && (
+          <ThinkingWithSteps steps={liveSteps || []} />
+        )}
       </div>
     </div>
   );
@@ -64,6 +77,11 @@ function Bubble({ m }: { m: Message }) {
         )}
 
         <div className={cn("flex-1 min-w-0", isUser ? "flex justify-end" : "")}>
+          {/* Steps trace, collapsed by default, like Cursor */}
+          {!isUser && m.steps && m.steps.length > 0 && (
+            <StepsTrace steps={m.steps} done={true} />
+          )}
+
           {/* Main content body */}
           <div
             className={cn(
@@ -142,17 +160,74 @@ function Markdown({ text }: { text: string }) {
   );
 }
 
-function Thinking() {
+function ThinkingWithSteps({ steps }: { steps: Step[] }) {
   return (
     <div className="flex gap-3.5">
       <div className="shrink-0 flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-tr from-[#7c5cff] via-[#9b76ff] to-[#f43f5e] shadow-[0_2px_10px_rgba(124,92,255,0.3)]">
         <Sparkles size={14} className="text-white animate-spin [animation-duration:3s]" />
       </div>
-      <div className="flex items-center gap-1.5 pl-1.5 md:pl-0 mt-2">
-        <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-200ms]" />
-        <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-100ms]" />
-        <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce" />
+      <div className="flex-1 min-w-0">
+        {steps.length === 0 ? (
+          <div className="flex items-center gap-1.5 pl-1.5 md:pl-0 mt-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-200ms]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-100ms]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce" />
+          </div>
+        ) : (
+          <StepsTrace steps={steps} done={false} />
+        )}
       </div>
+    </div>
+  );
+}
+
+function StepsTrace({ steps, done }: { steps: Step[]; done: boolean }) {
+  const [open, setOpen] = useState(!done);
+  const last = steps[steps.length - 1];
+  const summary = done
+    ? `Thought through ${steps.length} step${steps.length === 1 ? "" : "s"}`
+    : last?.label || "Thinking";
+
+  return (
+    <div className="mb-2.5 max-w-full">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="group flex items-center gap-2 text-[12.5px] text-[#8e918f] hover:text-zinc-200 transition-colors py-1"
+      >
+        <ChevronRight
+          size={13}
+          className={cn("transition-transform duration-200", open && "rotate-90")}
+        />
+        {!done && <Loader2 size={12} className="animate-spin text-[var(--accent)]" />}
+        <span className="font-medium">{summary}</span>
+        {!done && last?.detail && (
+          <span className="text-[#6b6e70] truncate max-w-[280px]">· {last.detail}</span>
+        )}
+      </button>
+
+      {open && (
+        <ul className="mt-2 ml-1 border-l-2 border-[#2d2f31] pl-3.5 space-y-1.5">
+          {steps.map((s, i) => {
+            const isLast = i === steps.length - 1;
+            const isPending = !done && isLast;
+            return (
+              <li key={s.id} className="text-[12.5px] leading-snug">
+                <div className="flex items-center gap-2">
+                  {isPending ? (
+                    <Loader2 size={11} className="animate-spin text-[var(--accent)] shrink-0" />
+                  ) : (
+                    <Check size={11} className="text-emerald-400 shrink-0" />
+                  )}
+                  <span className="font-medium text-zinc-300">{s.label}</span>
+                </div>
+                {s.detail && (
+                  <div className="text-[11.5px] text-[#8e918f] ml-[19px] mt-0.5">{s.detail}</div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
