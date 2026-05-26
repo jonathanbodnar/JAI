@@ -49,25 +49,59 @@ const FILE_BY_LANG = {
 } as const;
 
 const ENV_FILE = "/workspace/.env.json";
+const PIP_MARKER = "/workspace/.pip-installed";
+const NPM_MARKER = "/workspace/.npm-installed";
 
-// Bootstrap snippets injected at the top of every script so env vars get
-// loaded from a JSON file instead of shell-escaped on the command line.
-// OAuth token blobs and other long JSON values shred the bash quoter; a
-// JSON file is bulletproof regardless of the value content.
+// Packages JAI skills routinely need. Installed lazily on first run per
+// container instance and then cached (via the marker file) so subsequent
+// runs skip straight to executing the user script.
+const PIP_PACKAGES = [
+  "httpx",
+  "pydantic",
+  "google-api-python-client",
+  "google-auth",
+  "google-auth-oauthlib",
+  "google-auth-httplib2",
+  "notion-client",
+  "slack-sdk",
+  "supabase",
+  "beautifulsoup4",
+  "python-dateutil",
+].join(" ");
+
+const NPM_PACKAGES = ["tsx", "typescript"].join(" ");
+
+// Bootstrap snippets injected at the top of every script:
+//   1. Load env vars from /workspace/.env.json (bulletproof for OAuth blobs)
+//   2. Lazy-install language-specific deps on first run (cached afterward)
 const PRELUDE: Record<keyof typeof FILE_BY_LANG, string> = {
   python:
-    "import os, json\n" +
+    "import os, json, subprocess, sys\n" +
     "try:\n" +
     `    with open(${JSON.stringify(ENV_FILE)}) as _f:\n` +
     "        for _k, _v in json.load(_f).items():\n" +
     "            if isinstance(_v, str):\n" +
     "                os.environ[_k] = _v\n" +
     "except Exception:\n" +
-    "    pass\n",
+    "    pass\n" +
+    `if not os.path.exists(${JSON.stringify(PIP_MARKER)}):\n` +
+    "    try:\n" +
+    `        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir"] + ${JSON.stringify(
+      PIP_PACKAGES.split(" "),
+    )}, check=True)\n` +
+    `        open(${JSON.stringify(PIP_MARKER)}, "w").close()\n` +
+    "    except Exception as _e:\n" +
+    '        print(f"[jai-prelude] pip install warning: {_e}", file=sys.stderr)\n',
   typescript:
-    `import fs from "node:fs"; try { const _e = JSON.parse(fs.readFileSync(${JSON.stringify(
+    `import fs from "node:fs"; import { execSync } from "node:child_process";\n` +
+    `try { const _e = JSON.parse(fs.readFileSync(${JSON.stringify(
       ENV_FILE,
-    )}, "utf8")); for (const [k, v] of Object.entries(_e)) { if (typeof v === "string") process.env[k] = v; } } catch {}\n`,
+    )}, "utf8")); for (const [k, v] of Object.entries(_e)) { if (typeof v === "string") process.env[k] = v; } } catch {}\n` +
+    `if (!fs.existsSync(${JSON.stringify(NPM_MARKER)})) {\n` +
+    `  try { execSync("npm install -g ${NPM_PACKAGES}", { stdio: "ignore" }); fs.writeFileSync(${JSON.stringify(
+      NPM_MARKER,
+    )}, ""); } catch (e) { console.error("[jai-prelude] npm install warning:", e); }\n` +
+    `}\n`,
   bash:
     `# bash skills can load env vars via:\n` +
     `#   eval "$(python3 -c 'import json,os,shlex; j=json.load(open(\\"${ENV_FILE}\\")); [print(f\"export {k}={shlex.quote(v)}\") for k,v in j.items() if isinstance(v,str)]')"\n`,

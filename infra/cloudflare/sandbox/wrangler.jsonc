@@ -8,7 +8,12 @@
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "./Dockerfile",
+      // Reference the official Cloudflare Sandbox image directly from Docker
+      // Hub so wrangler doesn't need a local Docker daemon to build/push.
+      // Skills install whatever extra Python packages they need at runtime
+      // via the prelude in src/index.ts (cached after first install per
+      // container instance).
+      "image": "docker.io/cloudflare/sandbox:0.7.0",
       "instance_type": "lite",
       "max_instances": 8
     }
