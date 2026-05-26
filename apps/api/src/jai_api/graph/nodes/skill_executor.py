@@ -93,6 +93,33 @@ async def skill_executor(state: JaiState) -> dict:
     }
 
 
+def _trim_for_synthesis(value, depth: int = 0):
+    """Shrink long string fields recursively so Kimi sees the structure
+    without burning tokens on full email bodies, repeated metadata, etc.
+
+    The key invariant we protect: every dict KEY is preserved (so the
+    LLM can see all accounts/projects/groups exist), only field VALUES
+    get trimmed.
+    """
+    if depth > 6:
+        return "…"
+    if isinstance(value, dict):
+        return {k: _trim_for_synthesis(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        # For large lists, keep the first ~10 items but show the count.
+        if len(value) > 12:
+            head = [_trim_for_synthesis(v, depth + 1) for v in value[:10]]
+            head.append(f"…({len(value) - 10} more)")
+            return head
+        return [_trim_for_synthesis(v, depth + 1) for v in value]
+    if isinstance(value, str):
+        # Snippets/bodies routinely arrive at 500-2000 chars each. The
+        # LLM doesn't need that much to summarize.
+        if len(value) > 240:
+            return value[:240].rstrip() + "…"
+    return value
+
+
 def _is_structured(result) -> bool:
     """Worth synthesizing through an LLM?
 
@@ -120,16 +147,24 @@ Rules:
 - Be specific. Use the actual values from the data (names, numbers,
   dates, subjects). Don't summarize the *structure*, summarize the
   *content*.
-- For lists of items (emails, tasks, events): show the top 5-10 as a
-  short bulleted list, one line each, most important first. Then a
-  one-sentence overall takeaway if there's something worth flagging.
+- For lists of items (emails, tasks, events): show the top 3-6 per
+  group as a short bulleted list, one line each, most important first.
+  Add a one-sentence takeaway if there's something worth flagging.
 - For single records: lead with the headline, follow with 1-3 useful
   details.
 - For metrics/counts: state the number plainly, then any context.
-- Mention the source account/project once when it's relevant (e.g. "from
-  your Lunarpay inbox"); don't repeat it on every line.
+- CRITICAL: When the data is grouped (`by_account`, `by_calendar`,
+  `by_project`, etc.) you MUST include EVERY key in your output, even
+  if only a one-line summary per group. Dropping an entire account
+  because the response is getting long is the worst failure mode —
+  trim the per-item details first, never skip a group. Use H3 headers
+  or short section labels per group so the user can scan.
+- If a group has an `error` field instead of items, mention the
+  failure: e.g. "Lunarpay — couldn't fetch (token error)" — never
+  silently omit it.
 - Skip junk: unsubscribe links, full message IDs, raw thread IDs,
-  internal tokens.
+  internal tokens, mass marketing emails (Express, Printful,
+  newsletters) unless they're the only thing in the list.
 - No preamble, no "Done!", no "I found...". Just the answer.
 
 If the data is empty or the user's question can't be answered from it,
@@ -145,14 +180,15 @@ async def _synthesize_result(
     first_run: bool,
 ) -> str:
     """Have Kimi (RESPOND role) rewrite the skill's structured data."""
+    trimmed = _trim_for_synthesis(result)
     try:
-        payload = json.dumps(result, default=str, indent=2)
+        payload = json.dumps(trimmed, default=str, indent=2)
     except Exception:
-        payload = str(result)
-    # Trim aggressively — most JSON results have repetitive metadata that
-    # eats context for nothing.
-    if len(payload) > 6000:
-        payload = payload[:6000] + "\n…(truncated)"
+        payload = str(trimmed)
+    # Cap at 12k chars after trimming — Kimi has room for ~32k context
+    # but we want to keep the answer focused and fast.
+    if len(payload) > 12000:
+        payload = payload[:12000] + "\n…(truncated)"
 
     skill_hint = f" (via skill: {skill_name})" if skill_name else ""
     human_content = (

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "@xyflow/react/dist/style.css";
 import { BottomNav } from "@/components/nav/BottomNav";
+import { RightPanel } from "@/components/nav/RightPanel";
 import { Sidebar } from "@/components/nav/Sidebar";
 import { AuthGate } from "@/lib/auth-gate";
 import { OnboardingGate } from "@/components/onboarding/Onboarding";
@@ -47,6 +48,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <main className="flex-1 overflow-hidden relative">{children}</main>
               <BottomNav />
             </div>
+            <RightPanel />
           </OnboardingGate>
         </AuthGate>
       </body>
