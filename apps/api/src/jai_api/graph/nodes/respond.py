@@ -30,12 +30,14 @@ _SKILL_CONTEXT_TTL = timedelta(minutes=20)
 
 def _format_skill_context(state: JaiState) -> str:
     """If the most recent skill run is still fresh, surface its RAW
-    output so the responder can refine/re-filter it instead of treating
-    the user's follow-up ("not junk mail", "only from people", etc.) as
-    a standalone musing.
+    output (and the canvas, if any) so the responder can refine,
+    expand, or otherwise act on it without forgetting what just
+    happened. Without this, follow-ups like "longer please", "shorter",
+    "drop the third one" come back with "I don't see my previous reply".
     """
     output = state.get("skill_output")
-    if not output:
+    canvas = state.get("canvas")
+    if not output and not canvas:
         return ""
     when_str = state.get("skill_output_at")
     if when_str:
@@ -50,19 +52,46 @@ def _format_skill_context(state: JaiState) -> str:
 
     skill_name = state.get("skill_name") or "unknown skill"
     summary = state.get("skill_output_summary") or ""
-    trimmed = _trim_for_synthesis(output)
-    try:
-        payload = json.dumps(trimmed, default=str, indent=2)
-    except Exception:
-        payload = str(trimmed)
-    if len(payload) > 8000:
-        payload = payload[:8000] + "\n…(truncated)"
 
     sections: list[str] = []
     sections.append(f"Skill: {skill_name}")
     if summary:
-        sections.append(f"Last summary you gave the user:\n{summary[:1500]}")
-    sections.append(f"Raw data still available for refinement:\n```json\n{payload}\n```")
+        sections.append(f"Last chat reply you gave the user (the short bubble):\n{summary[:1500]}")
+
+    # Surface the canvas verbatim when it's the user's "real" output —
+    # the chat bubble is often a one-liner ("Drafted email to X") while
+    # the canvas holds the actual content the user is asking about.
+    if isinstance(canvas, dict):
+        kind = canvas.get("kind") or "artifact"
+        title = canvas.get("title") or ""
+        content = (canvas.get("content") or "").strip()
+        if content:
+            meta = canvas.get("metadata") or {}
+            meta_lines = ""
+            if isinstance(meta, dict) and meta:
+                meta_pairs = [
+                    f"- {k}: {v}"
+                    for k, v in meta.items()
+                    if v not in (None, "", []) and isinstance(v, (str, int, float, bool))
+                ]
+                if meta_pairs:
+                    meta_lines = "\n".join(meta_pairs) + "\n\n"
+            # Cap canvas body so a 30k-char document doesn't blow the context
+            body = content if len(content) <= 8000 else content[:8000] + "\n…(truncated)"
+            sections.append(
+                f"Canvas the user is looking at ({kind} — {title}):\n"
+                f"{meta_lines}---\n{body}\n---"
+            )
+
+    if output:
+        trimmed = _trim_for_synthesis(output)
+        try:
+            payload = json.dumps(trimmed, default=str, indent=2)
+        except Exception:
+            payload = str(trimmed)
+        if len(payload) > 6000:
+            payload = payload[:6000] + "\n…(truncated)"
+        sections.append(f"Raw skill data still available:\n```json\n{payload}\n```")
     return "\n\n".join(sections)
 
 
@@ -74,20 +103,33 @@ async def respond(state: JaiState) -> dict:
     sys_text = RESPOND_SYSTEM + "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
     if skill_block:
         sys_text += (
-            "\n\n=== RECENT SKILL OUTPUT (in scope for follow-ups) ===\n"
+            "\n\n=== RECENT SKILL / CANVAS CONTEXT (in scope for follow-ups) ===\n"
             + skill_block
-            + "\n\nIf the user's current message is a refinement, filter, "
-            "exclusion, or commentary about that output (e.g. \"not junk\", "
-            "\"only from people\", \"without GitHub noise\", \"actually just X\"), "
-            "re-derive the answer from the raw data above. Do NOT redirect them "
-            "to re-run a skill — you already have the data. Keep the same "
-            "structure (grouped by account, dated, etc.) and apply their "
-            "constraint. If the user is clearly off-topic, ignore this section."
+            + "\n\nThis is the artifact the user JUST saw. Treat their current "
+            "message as a follow-up about it unless they obviously change topic. "
+            "Examples that ARE follow-ups:\n"
+            "  - Refinements: \"only from real people\", \"not junk\", \"drop "
+            "the third one\", \"without the GitHub noise\".\n"
+            "  - Length changes: \"longer please\", \"shorter\", \"tl;dr\", "
+            "\"go deeper\", \"more detail\", \"elaborate\", \"expand on that\".\n"
+            "  - Edits to a draft: \"more casual\", \"add a P.S.\", \"reword "
+            "the opener\", \"change the subject\", \"make it punchier\".\n"
+            "  - Conditional rules: \"if it's X, do Y\" (apply to the artifact "
+            "going forward — don't ask to see the data again).\n"
+            "Re-derive the answer from the canvas / raw data above. DO NOT "
+            "say \"I don't see my previous reply\" — it is right above; read "
+            "it. DO NOT redirect them to re-run a skill. DO NOT ask them to "
+            "re-paste data you already have. Keep the same structure (grouped "
+            "by account, dated, draft format, etc.) and apply their constraint. "
+            "Only ignore this section if the user clearly changes topic."
         )
 
     sys = SystemMessage(content=sys_text)
 
-    window = (state.get("messages") or [])[-20:]
+    # 30 messages ≈ 15 turns of back-and-forth — generous enough to
+    # cover a multi-step thread (draft → tweak → tweak → send) while
+    # staying well inside Kimi's context budget.
+    window = (state.get("messages") or [])[-30:]
 
     res = await llm.ainvoke([sys, *window])
     text = res.content if isinstance(res.content, str) else str(res.content)

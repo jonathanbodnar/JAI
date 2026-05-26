@@ -12,10 +12,12 @@ DESCRIPTION = (
     "Create or update one of the living KPIs shown across the top of the "
     "JAI header. Inputs: key (slug like 'mrr' or 'active_users'), label "
     "(human title), value (any string — '$48,250', '12.4%', '34', '3d 4h'), "
-    "format (one of raw/number/currency/percent/duration), unit (optional, "
-    "e.g. 'users'), icon (optional lucide name), source (default 'skill'). "
-    "Use when the user says 'track X = N' or after a skill computes a "
-    "metric you want pinned to the top of the app."
+    "goal (optional target — '300', '$10k', '100%'; renders as '27 / 300' "
+    "with a progress bar), format (one of raw/number/currency/percent/"
+    "duration), unit (optional, e.g. 'users'), icon (optional lucide name), "
+    "source (default 'skill'). Use when the user says 'track X = N', "
+    "'track X to N out of M', or after a skill computes a metric you "
+    "want pinned to the top of the app."
 )
 LANGUAGE = "python"
 USES_CREDENTIALS: list[str] = []
@@ -43,6 +45,8 @@ def coerce(v):
 key = (inputs.get("key") or "").strip().lower()
 label = (inputs.get("label") or "").strip()
 value = coerce(inputs.get("value"))
+goal_raw = inputs.get("goal")
+goal = coerce(goal_raw) if goal_raw not in (None, "", "—") else None
 fmt = (inputs.get("format") or "raw").strip().lower()
 if fmt not in ("raw", "number", "currency", "percent", "duration"):
     fmt = "raw"
@@ -50,13 +54,21 @@ unit = inputs.get("unit")
 icon = inputs.get("icon")
 source = inputs.get("source") or "skill"
 
-# If the caller didn't structure inputs, try to pull "label = value"
-# pairs out of the intent itself.
+# If the caller didn't structure inputs, try to pull "label = value/goal"
+# out of the intent itself. Supports "X = 27/300", "X = 27 of 300",
+# "X = 27 out of 300" so the user can dictate a goal in one line.
 if not key and intent:
-    m = re.search(r"([A-Za-z][A-Za-z0-9 _-]+?)\s*(?:=|:|to|->)\s*([\$%]?[\d.,]+[%kKmMbB]?)", intent)
+    m = re.search(
+        r"([A-Za-z][A-Za-z0-9 _-]+?)\s*(?:=|:|to|->)\s*"
+        r"([\$%]?[\d.,]+[%kKmMbB]?)"
+        r"(?:\s*(?:/|of|out of)\s*([\$%]?[\d.,]+[%kKmMbB]?))?",
+        intent,
+    )
     if m:
         label = label or m.group(1).strip()
         value = coerce(m.group(2))
+        if not goal and m.group(3):
+            goal = coerce(m.group(3))
 if not key and label:
     key = slugify(label)
 if not label and key:
@@ -89,6 +101,7 @@ if found:
     payload = {
         "label": label or cur["label"],
         "value": value,
+        "goal": goal if goal is not None else cur.get("goal"),
         "previous": cur.get("value"),
         "format": fmt,
         "unit": unit if unit is not None else cur.get("unit"),
@@ -110,6 +123,7 @@ else:
         "key": key,
         "label": label,
         "value": value,
+        "goal": goal,
         "format": fmt,
         "unit": unit,
         "icon": icon,
@@ -127,6 +141,7 @@ print(json.dumps({"status": "ok", "result": {
     "key": row["key"],
     "label": row["label"],
     "value": row["value"],
+    "goal": row.get("goal"),
     "previous": row.get("previous"),
     "format": row.get("format"),
 }}))

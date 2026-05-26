@@ -46,6 +46,10 @@ class KpiIn(BaseModel):
     key: str | None = None
     label: str
     value: str
+    # Optional target. Stored as text so formatting is preserved
+    # ("$10k", "300 users", "1.0%"). Renderer parses the numeric part
+    # for progress bars and "value/goal" display.
+    goal: str | None = None
     format: Format = "raw"
     unit: str | None = None
     icon: str | None = None
@@ -58,6 +62,7 @@ class KpiIn(BaseModel):
 class KpiPatch(BaseModel):
     label: str | None = None
     value: str | None = None
+    goal: str | None = None
     format: Format | None = None
     unit: str | None = None
     icon: str | None = None
@@ -76,6 +81,7 @@ class KpiUpsert(BaseModel):
     key: str
     label: str | None = None
     value: str
+    goal: str | None = None
     format: Format | None = None
     unit: str | None = None
     icon: str | None = None
@@ -197,6 +203,8 @@ async def upsert_kpi(user: CurrentUserDep, body: KpiUpsert) -> dict:
             update_patch["icon"] = body.icon
         if body.source is not None:
             update_patch["source"] = body.source
+        if body.goal is not None:
+            update_patch["goal"] = body.goal
         res = (
             sb.table("kpis")
             .update(update_patch)
@@ -211,6 +219,7 @@ async def upsert_kpi(user: CurrentUserDep, body: KpiUpsert) -> dict:
         "key": key,
         "label": body.label or key.replace("_", " ").title(),
         "value": body.value,
+        "goal": body.goal,
         "format": body.format or "raw",
         "unit": body.unit,
         "icon": body.icon,
