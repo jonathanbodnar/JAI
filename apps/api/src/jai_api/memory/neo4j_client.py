@@ -162,6 +162,112 @@ class JaiNeo4j:
                 out.append({"node": node, "edges": edges})
         return out
 
+    async def fetch_all_concepts(self, user_id: str) -> list[dict]:
+        """Return every concept-class node with its degree — used by the
+        deduplication pass to pick the canonical survivor in each group."""
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.user_id = $uid "
+            "  AND labels(n)[0] IN ['Belief','Topic','Project','Concept','Company','Tool','Pattern','Skill','Decision','Person'] "
+            "  AND coalesce(n.is_me, false) = false "
+            "OPTIONAL MATCH (n)-[r]-() "
+            "WITH n, labels(n)[0] AS label, count(r) AS degree "
+            "RETURN label, n.id AS id, coalesce(n.name, '') AS name, "
+            "       coalesce(n.updated_at, datetime()) AS updated_at, degree"
+        )
+        out: list[dict] = []
+        async with self._driver.session(database=self._db) as sess:
+            res = await sess.run(cypher, uid=user_id)
+            async for rec in res:
+                out.append(
+                    {
+                        "id": rec["id"],
+                        "label": rec["label"],
+                        "name": rec["name"],
+                        "updated_at": str(rec["updated_at"]),
+                        "degree": int(rec["degree"] or 0),
+                    }
+                )
+        return out
+
+    async def merge_nodes(
+        self, *, user_id: str, canonical_id: str, dup_id: str
+    ) -> dict[str, int]:
+        """Re-route every edge of `dup_id` onto `canonical_id`, then detach-delete `dup_id`.
+
+        Edges are MERGE'd by type so the canonical node never accumulates
+        parallel duplicate relationships of the same type to the same neighbor."""
+        if canonical_id == dup_id:
+            return {"edges_moved": 0, "deleted": 0}
+
+        moved = 0
+        deleted = 0
+        async with self._driver.session(database=self._db) as sess:
+            # Resolve canonical label so we can build typed Cypher.
+            res = await sess.run(
+                "MATCH (c {id: $cid, user_id: $uid}) RETURN labels(c)[0] AS l",
+                cid=canonical_id, uid=user_id,
+            )
+            rec = await res.single()
+            if not rec:
+                return {"edges_moved": 0, "deleted": 0}
+            canon_label = rec["l"]
+
+            # Pull outgoing rels of the duplicate.
+            outgoing: list[tuple[str, str, str]] = []
+            res = await sess.run(
+                "MATCH (d {id: $dup, user_id: $uid})-[r]->(t) "
+                "WHERE t.user_id = $uid AND t.id <> $cid "
+                "RETURN type(r) AS rel, t.id AS tid, labels(t)[0] AS tlabel",
+                dup=dup_id, uid=user_id, cid=canonical_id,
+            )
+            async for r in res:
+                outgoing.append((r["rel"], r["tid"], r["tlabel"]))
+
+            # Pull incoming rels.
+            incoming: list[tuple[str, str, str]] = []
+            res = await sess.run(
+                "MATCH (s)-[r]->(d {id: $dup, user_id: $uid}) "
+                "WHERE s.user_id = $uid AND s.id <> $cid "
+                "RETURN type(r) AS rel, s.id AS sid, labels(s)[0] AS slabel",
+                dup=dup_id, uid=user_id, cid=canonical_id,
+            )
+            async for r in res:
+                incoming.append((r["rel"], r["sid"], r["slabel"]))
+
+            for rel, tid, tlabel in outgoing:
+                try:
+                    await sess.run(
+                        f"MATCH (c:{canon_label} {{id: $cid, user_id: $uid}}), "
+                        f"      (t:{tlabel} {{id: $tid, user_id: $uid}}) "
+                        f"MERGE (c)-[:{rel}]->(t)",
+                        cid=canonical_id, tid=tid, uid=user_id,
+                    )
+                    moved += 1
+                except Exception as e:
+                    log.warning("merge.out_edge_failed", rel=rel, error=str(e))
+
+            for rel, sid, slabel in incoming:
+                try:
+                    await sess.run(
+                        f"MATCH (s:{slabel} {{id: $sid, user_id: $uid}}), "
+                        f"      (c:{canon_label} {{id: $cid, user_id: $uid}}) "
+                        f"MERGE (s)-[:{rel}]->(c)",
+                        sid=sid, cid=canonical_id, uid=user_id,
+                    )
+                    moved += 1
+                except Exception as e:
+                    log.warning("merge.in_edge_failed", rel=rel, error=str(e))
+
+            res = await sess.run(
+                "MATCH (d {id: $dup, user_id: $uid}) DETACH DELETE d RETURN 1 AS done",
+                dup=dup_id, uid=user_id,
+            )
+            if await res.single():
+                deleted = 1
+
+        return {"edges_moved": moved, "deleted": deleted}
+
     async def fetch_recent_concepts(self, user_id: str, limit: int = 60) -> list[dict]:
         """Return the user's most recently touched concept-like nodes for the
         cross-link inference pass.

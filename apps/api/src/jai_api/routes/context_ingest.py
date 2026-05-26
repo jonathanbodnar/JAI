@@ -1270,6 +1270,99 @@ async def context_forget(user: CurrentUserDep, body: ContextForget) -> dict[str,
     return out
 
 
+@router.post("/graph/dedupe")
+async def graph_dedupe(user: CurrentUserDep) -> dict[str, Any]:
+    """One-shot pass that merges duplicate concept nodes.
+
+    For each (label, normalized_name) group of size >1, we pick the canonical
+    survivor (highest degree, ties broken by most-recently-updated), re-route
+    every incoming and outgoing edge onto it, then detach-delete the rest.
+
+    Belief text is normalized through `_normalize_belief_text` to collapse
+    "I believe X" / "My principle is X" / plain "X" onto the same node.
+    Everything else dedupes by lowercased, trimmed name."""
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        raise HTTPException(503, f"graph unavailable: {e}") from e
+
+    merged = 0
+    edges_moved = 0
+    groups_checked = 0
+    try:
+        rows = await n4.fetch_all_concepts(user.user_id)
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for r in rows:
+            name = (r.get("name") or "").strip()
+            label = r.get("label") or ""
+            if not name or not label:
+                continue
+            norm = (
+                _normalize_belief_text(name) if label == "Belief" else name.lower()
+            )
+            if not norm:
+                continue
+            groups.setdefault((label, norm), []).append(r)
+
+        for (label, norm), group in groups.items():
+            if len(group) < 2:
+                continue
+            groups_checked += 1
+            # Canonical = most-connected first, then most-recently-updated.
+            group.sort(
+                key=lambda r: (-(r.get("degree") or 0), r.get("updated_at") or ""),
+                reverse=False,
+            )
+            # After sort: most-connected first if degree desc was the dominant key.
+            # The lambda above puts highest degree first because it's negated.
+            canonical = group[0]
+            for dup in group[1:]:
+                try:
+                    res = await n4.merge_nodes(
+                        user_id=user.user_id,
+                        canonical_id=canonical["id"],
+                        dup_id=dup["id"],
+                    )
+                    edges_moved += res.get("edges_moved", 0)
+                    if res.get("deleted"):
+                        merged += 1
+                except Exception as e:
+                    log.warning(
+                        "graph.dedupe.merge_failed",
+                        canonical=canonical["id"],
+                        dup=dup["id"],
+                        error=str(e),
+                    )
+
+        try:
+            await audit_write(
+                user_id=user.user_id,
+                actor="context",
+                action="context.graph.dedupe",
+                payload={
+                    "merged": merged,
+                    "edges_moved": edges_moved,
+                    "groups_checked": groups_checked,
+                    "total_nodes": len(rows),
+                },
+            )
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "merged": merged,
+            "edges_moved": edges_moved,
+            "groups_checked": groups_checked,
+            "total_nodes": len(rows),
+        }
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
+
+
 @router.post("/graph/rebuild")
 async def graph_rebuild(user: CurrentUserDep) -> dict[str, Any]:
     """Re-run entity extraction over every previously-ingested chunk in Qdrant

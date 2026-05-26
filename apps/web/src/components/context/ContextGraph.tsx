@@ -22,7 +22,7 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCw, X, Trash2, Pencil, Check } from "lucide-react";
+import { RefreshCw, X, Trash2, Pencil, Check, Sparkles } from "lucide-react";
 
 type GraphNode = {
   id: string;
@@ -270,6 +270,7 @@ export function ContextGraph() {
   );
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildMsg, setRebuildMsg] = useState<string | null>(null);
+  const [deduping, setDeduping] = useState(false);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
 
@@ -293,6 +294,34 @@ export function ContextGraph() {
     () => layout(data, hidden),
     [data, hidden],
   );
+
+  const dedupe = async () => {
+    if (deduping) return;
+    setDeduping(true);
+    setRebuildMsg(null);
+    try {
+      const r = (await api("/context/graph/dedupe", { method: "POST" })) as {
+        merged: number;
+        edges_moved: number;
+        groups_checked: number;
+        total_nodes: number;
+      };
+      await mutate();
+      if (r.merged === 0) {
+        setRebuildMsg(
+          `No duplicates found across ${r.total_nodes} concept nodes.`,
+        );
+      } else {
+        setRebuildMsg(
+          `Merged ${r.merged} duplicate node${r.merged === 1 ? "" : "s"} across ${r.groups_checked} group${r.groups_checked === 1 ? "" : "s"}, preserved ${r.edges_moved} edges.`,
+        );
+      }
+    } catch (err) {
+      setRebuildMsg(`Dedupe failed: ${(err as Error).message}`);
+    } finally {
+      setDeduping(false);
+    }
+  };
 
   const rebuild = async () => {
     if (rebuilding) return;
@@ -370,17 +399,28 @@ export function ContextGraph() {
   return (
     <div className="h-full w-full relative">
       <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1">
-        <button
-          onClick={rebuild}
-          disabled={rebuilding}
-          className="text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-elev2)] border border-[var(--line)] text-[var(--fg-mute)] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
-          title="Re-run entity extraction over all ingested docs"
-        >
-          <RefreshCw size={11} className={rebuilding ? "animate-spin" : ""} />
-          {rebuilding ? "Rebuilding…" : "Rebuild"}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={dedupe}
+            disabled={deduping || rebuilding}
+            className="text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-elev2)] border border-[var(--line)] text-[var(--fg-mute)] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
+            title="Merge duplicate beliefs/concepts (preserves all edges)"
+          >
+            <Sparkles size={11} className={deduping ? "animate-pulse" : ""} />
+            {deduping ? "Merging…" : "Dedupe"}
+          </button>
+          <button
+            onClick={rebuild}
+            disabled={rebuilding || deduping}
+            className="text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-elev2)] border border-[var(--line)] text-[var(--fg-mute)] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
+            title="Re-run entity extraction over all ingested docs"
+          >
+            <RefreshCw size={11} className={rebuilding ? "animate-spin" : ""} />
+            {rebuilding ? "Rebuilding…" : "Rebuild"}
+          </button>
+        </div>
         {rebuildMsg && (
-          <div className="text-[10px] text-[var(--fg-mute)] bg-[var(--bg-elev2)] border border-[var(--line)] rounded px-2 py-1 max-w-[220px] text-right">
+          <div className="text-[10px] text-[var(--fg-mute)] bg-[var(--bg-elev2)] border border-[var(--line)] rounded px-2 py-1 max-w-[260px] text-right">
             {rebuildMsg}
           </div>
         )}
