@@ -37,6 +37,26 @@ def _ws_user(token: str | None = Query(default=None)) -> CurrentUser:
     return get_current_user(authorization=f"Bearer {token}" if token else None)
 
 
+# Cheap per-user cooldown so repeated WS reconnects (Railway redeploys,
+# tab switching) don't hammer the seeder. 12h means a user picks up a
+# fresh library skill within one chat session of a deploy.
+_LIBRARY_SEED_TTL_SECONDS = 12 * 3600
+_library_seed_last: dict[str, float] = {}
+
+
+async def _seed_library_safe(user_id: str) -> None:
+    import time
+    last = _library_seed_last.get(user_id, 0.0)
+    if time.time() - last < _LIBRARY_SEED_TTL_SECONDS:
+        return
+    _library_seed_last[user_id] = time.time()
+    try:
+        from ..skills.library_seed import seed_user_library
+        await seed_user_library(user_id=user_id)
+    except Exception as e:
+        log.warning("library.autoseed_failed", user_id=user_id[:8], error=str(e))
+
+
 @router.get("/recent")
 async def recent_messages(user: CurrentUserDep, limit: int = 100) -> dict:
     """Return the most recent messages from the user's primary conversation.
@@ -167,6 +187,14 @@ async def chat_ws(ws: WebSocket, user: CurrentUser = Depends(_ws_user)):
     # Resolve (or create) the user's primary conversation. With Supabase service
     # role we bypass RLS and trust the auth gate above.
     conv_id = await _primary_conversation_id(sb, user.user_id) if sb else "dev"
+
+    # Bring this user's library up to date in the background. Without
+    # this, a user who onboarded before a new library skill (e.g.
+    # sheets.read_rows) was added would never see it unless they
+    # manually hit Settings → Skills → Install all. The seeder is
+    # idempotent and skips skills whose source hasn't changed, so this
+    # is cheap on the steady-state path.
+    asyncio.create_task(_seed_library_safe(user.user_id))
 
     audio_buffer = BytesIO()
     expecting_audio = False

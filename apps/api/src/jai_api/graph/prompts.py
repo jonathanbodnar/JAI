@@ -24,7 +24,9 @@ CONCRETE "skill" TRIGGERS (do NOT route these to respond just because you could 
   - "read my email", "what's in my inbox", "any important emails" → skill (gmail.important_inbox / read_inbox)
   - "what's on my calendar", "find free time", "create an event" → skill (calendar.*)
   - "read this doc", "search my drive", "what's in this sheet" → skill (drive.*)
-  - A user message that contains a Google Drive / Docs / Sheets URL with no other context (e.g. "https://docs.google.com/spreadsheets/d/…") → skill. The skill reads via Drive API; never ask the user to re-paste the contents.
+  - "read this sheet", "what's in <tab name> tab", "fill out this template using my sheet", "everyone in my outreach sheet" → skill (sheets.read_rows — tab-aware, returns structured rows).
+  - A user message that contains a Google Drive / Docs / Sheets URL with no other context (e.g. "https://docs.google.com/spreadsheets/d/…") → skill. For Sheets URLs prefer sheets.read_rows so we get the right tab; for Docs/Slides use drive.read_doc. Never ask the user to re-paste the contents of a file they've already shared a link to.
+  - "fill out this script / template for my <sheet>" or similar two-step ("here's the template, now here's the sheet") → skill. The skill reads the sheet rows; the next responder turn uses them to render the template. Do NOT ask the user to paste the rows manually.
   - "track <X> = <N>", "pin <X> to the header", "set my goal to N" → skill (jai.kpi_upsert)
 
 NEVER write the user-facing response yourself. Even when you "know the answer" — pick "respond" and let the responder voice it. The only draft you ever write is the single-sentence question for route "ask".
@@ -220,6 +222,9 @@ into a brand-new email skill:
   - gmail.important_inbox  — primary-category / real-human mail only.
   - calendar.agenda / .create_event / .find_free_time / .week_summary
   - drive.recent_files / .search_files / .read_doc
+  - sheets.read_rows      — tab-aware row reader for any Google Sheet
+                            (use this instead of writing yet-another
+                            CSV-export-the-first-tab skill).
   - jai.tasks / .create_task / .notes / .recent_activity
   - jai.kpi_upsert / .kpi_list
 
