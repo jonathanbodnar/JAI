@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChatSocket, type ServerMsg } from "@/lib/ws";
 import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
 import { api } from "@/lib/api";
+import { supabase } from "@/lib/supabase";
 import Link from "next/link";
 import { Settings, Trash2, BrainCircuit } from "lucide-react";
 import { MessageList, type Message, type Step } from "./MessageList";
@@ -74,7 +75,17 @@ export function ChatView() {
         messages: ServerMessageRow[];
       };
       if (!Array.isArray(rows) || rows.length === 0) return;
-      setMessages((prev) => mergeServerMessages(prev, rows));
+      setMessages((prev) => {
+        const merged = mergeServerMessages(prev, rows);
+        // If the last message is from the user, the server is presumably
+        // still drafting a reply — surface that with the thinking spinner
+        // so a page refresh mid-turn doesn't look like the request was
+        // dropped. The Realtime subscription will clear it when the
+        // assistant row arrives.
+        const last = merged[merged.length - 1];
+        if (last && last.role === "user") setThinking(true);
+        return merged;
+      });
     } catch {
       // Network or auth blip — ignore; localStorage still has the user's view.
     }
@@ -88,6 +99,66 @@ export function ChatView() {
     };
     window.addEventListener("jai:new-chat", onNew);
     return () => window.removeEventListener("jai:new-chat", onNew);
+  }, []);
+
+  // Supabase Realtime subscription: whenever the API writes a new message
+  // row for this user (including server-side responses that happened while
+  // the page was refreshing or the WS was dead), append it to the local
+  // list. This is the safety net that makes "refresh while waiting" safe.
+  useEffect(() => {
+    const client = supabase();
+    let channel: ReturnType<typeof client.channel> | null = null;
+    let cancelled = false;
+    (async () => {
+      const { data } = await client.auth.getSession();
+      const uid = data.session?.user?.id;
+      if (!uid || cancelled) return;
+
+      channel = client
+        .channel(`rt-messages-${uid}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+            filter: `user_id=eq.${uid}`,
+          },
+          (payload) => {
+            const row = payload.new as {
+              id: string;
+              role: string;
+              content: string;
+              metadata?: { role_used?: string } | null;
+            };
+            if (row.role !== "user" && row.role !== "assistant") return;
+            setMessages((prev) => {
+              // Dedupe by (role, content) — the WS may have already pushed
+              // this exact text, and we don't want it twice.
+              const key = `${row.role}|${(row.content || "").trim()}`;
+              const seen = prev.some(
+                (m) => `${m.role}|${(m.text || "").trim()}` === key,
+              );
+              if (seen) return prev;
+              return [
+                ...prev,
+                {
+                  id: row.id,
+                  role: row.role as "user" | "assistant",
+                  text: row.content,
+                  agent: row.metadata?.role_used,
+                },
+              ];
+            });
+            if (row.role === "assistant") setThinking(false);
+          },
+        )
+        .subscribe();
+    })();
+    return () => {
+      cancelled = true;
+      if (channel) channel.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
