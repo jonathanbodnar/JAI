@@ -39,6 +39,8 @@ const ALL_TYPES = [
   "Project",
   "Belief",
   "Topic",
+  "Tool",
+  "Concept",
   "Decision",
   "Pattern",
   "Skill",
@@ -54,13 +56,18 @@ const labelColors: Record<string, string> = {
   Pattern: "#a855f7",
   Skill: "#84cc16",
   Topic: "#94a3b8",
+  Tool: "#ec4899",
+  Concept: "#64748b",
   Conversation: "#475569",
 };
 
+const ME_COLOR = "#f5f5f4";
+
 const BASE_RADIUS = 14;          // smallest node = single belief / leaf
 const MAX_RADIUS = 32;           // most-connected node
-const LINK_DIST = 90;
-const CHARGE = -260;
+const ME_RADIUS = 40;            // the user themself, always the biggest
+const LINK_DIST = 100;
+const CHARGE = -320;
 
 function truncate(s: string, n: number): string {
   s = (s || "").trim();
@@ -80,10 +87,11 @@ type NeuronData = {
   label: string;
   color: string;
   radius: number;
+  isMe?: boolean;
 };
 
 function NeuronNode({ data, selected }: NodeProps<Node<NeuronData>>) {
-  const { label, color, radius } = data;
+  const { label, color, radius, isMe } = data;
   return (
     <div
       style={{
@@ -99,24 +107,31 @@ function NeuronNode({ data, selected }: NodeProps<Node<NeuronData>>) {
           width: radius * 2,
           height: radius * 2,
           borderRadius: "9999px",
-          background: `radial-gradient(circle at 30% 30%, ${color}EE 0%, ${color}88 60%, ${color}22 100%)`,
-          border: `1px solid ${selected ? "#fff" : color}`,
-          boxShadow: selected
-            ? `0 0 24px ${color}, 0 0 8px #fff`
-            : `0 0 14px ${color}66, inset 0 0 8px ${color}33`,
+          background: isMe
+            ? `radial-gradient(circle at 30% 30%, #fff 0%, ${color}DD 55%, ${color}55 100%)`
+            : `radial-gradient(circle at 30% 30%, ${color}EE 0%, ${color}88 60%, ${color}22 100%)`,
+          border: `1px solid ${selected ? "#fff" : (isMe ? "#fff" : color)}`,
+          boxShadow: isMe
+            ? "0 0 28px rgba(255,255,255,.7), 0 0 14px rgba(255,255,255,.4)"
+            : selected
+              ? `0 0 24px ${color}, 0 0 8px #fff`
+              : `0 0 14px ${color}66, inset 0 0 8px ${color}33`,
           transition: "box-shadow 120ms ease",
         }}
       />
       <div
         style={{
-          fontSize: 9,
-          color: "#e4e4e7",
-          maxWidth: 110,
+          fontSize: isMe ? 11 : 9,
+          fontWeight: isMe ? 700 : 500,
+          color: isMe ? "#fafafa" : "#e4e4e7",
+          maxWidth: 130,
           lineHeight: 1.1,
           textAlign: "center",
           textShadow: "0 0 4px #000, 0 0 4px #000",
           padding: "0 2px",
           pointerEvents: "none",
+          letterSpacing: isMe ? 0.4 : 0,
+          textTransform: isMe ? "uppercase" : "none",
         }}
       >
         {label}
@@ -177,6 +192,18 @@ function layout(
     n.y = Math.sin(angle) * r0;
   });
 
+  // Pin the user's "Me" node to the center so the identity sits at the
+  // heart of the graph and everything else orbits around it.
+  visibleNodes.forEach((n, i) => {
+    if (n.props?.is_me) {
+      const sn = simNodes[i];
+      sn.x = 0;
+      sn.y = 0;
+      sn.fx = 0;
+      sn.fy = 0;
+    }
+  });
+
   const sim = forceSimulation(simNodes)
     .force("charge", forceManyBody().strength(CHARGE))
     .force("center", forceCenter(0, 0))
@@ -202,15 +229,17 @@ function layout(
   const nodes: Node[] = visibleNodes.map((d, i) => {
     idx.set(d.id, d);
     const sn = simNodes[i];
+    const isMe = Boolean(d.props?.is_me);
     const deg = degree.get(d.id) ?? 0;
-    const radius =
-      BASE_RADIUS + (MAX_RADIUS - BASE_RADIUS) * (deg / maxDeg);
-    const display = nodeDisplay(d);
-    const color = labelColors[d.label] || "#3f3f46";
+    const radius = isMe
+      ? ME_RADIUS
+      : BASE_RADIUS + (MAX_RADIUS - BASE_RADIUS) * (deg / maxDeg);
+    const display = isMe ? (d.name || "Me") : nodeDisplay(d);
+    const color = isMe ? ME_COLOR : (labelColors[d.label] || "#3f3f46");
     return {
       id: d.id,
       type: "neuron",
-      data: { label: display, color, radius } as NeuronData,
+      data: { label: display, color, radius, isMe } as NeuronData,
       position: { x: (sn.x ?? 0) - radius, y: (sn.y ?? 0) - radius },
     } as Node;
   });
@@ -219,13 +248,14 @@ function layout(
     id: `e${i}`,
     source: e.src,
     target: e.dst,
-    label: e.rel,
+    label: e.rel.replace(/_/g, " ").toLowerCase(),
     type: "straight",
     animated: false,
-    style: { stroke: "#52525b", strokeWidth: 0.8, opacity: 0.55 },
-    labelStyle: { fontSize: 8, fill: "#71717a" },
-    labelBgStyle: { fill: "transparent" },
-    labelShowBg: false,
+    style: { stroke: "#71717a", strokeWidth: 1, opacity: 0.7 },
+    labelStyle: { fontSize: 9, fill: "#a1a1aa", fontWeight: 500 },
+    labelBgStyle: { fill: "#0b0b0e", fillOpacity: 0.8 },
+    labelBgPadding: [4, 2] as [number, number],
+    labelBgBorderRadius: 4,
   }));
 
   return { nodes, edges, nodeIndex: idx };

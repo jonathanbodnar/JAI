@@ -178,17 +178,23 @@ def _chunk(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> 
 # --- fact extraction -----------------------------------------------------
 
 
-async def _extract_entities(text: str) -> dict[str, Any]:
-    """Pull entities + relationships out of a blob (best-effort).
+async def _extract_entities(text: str, *, user_display_name: str | None = None) -> dict[str, Any]:
+    """Pull entities + relationships from a blob, perspective: THE USER.
+
+    All extractions are first-person: every entity must be meaningful to the
+    human writing/owning the text. Things they merely *use* (Instagram, Zoom,
+    Slack) go in `tools`, NOT `companies`. Companies are only orgs the user
+    has founded, worked at, advised, or has a real relationship with.
 
     Returns shape:
       {
-        "people":   [{"name": "...", "role": "..."}, ...],
-        "companies":[{"name": "...", "note": "..."}, ...],
-        "projects": [{"name": "...", "note": "..."}, ...],
-        "beliefs":  [{"text": "..."}, ...],
-        "topics":   [{"name": "..."}, ...],
-        "relations":[{"src": "...", "rel": "WORKS_WITH", "dst": "..."}, ...],
+        "people":    [{"name": "...", "role": "..."}, ...],
+        "companies": [{"name": "...", "note": "...", "relation": "FOUNDED|WORKS_AT|ADVISES|..."}, ...],
+        "projects":  [{"name": "...", "note": "..."}, ...],
+        "beliefs":   [{"text": "..."}, ...],
+        "topics":    [{"name": "..."}, ...],
+        "tools":     [{"name": "...", "note": "..."}, ...],
+        "relations": [{"src": "...", "rel": "WORKS_WITH", "dst": "..."}, ...],
       }
     """
     if not text.strip():
@@ -204,23 +210,67 @@ async def _extract_entities(text: str) -> dict[str, Any]:
             temperature=0.0,
             streaming=False,
         )
-        prompt = (
-            "Extract entities and relationships from the text. Return STRICT JSON "
-            'matching this shape (no prose, no markdown fences):\n'
-            "{\n"
-            '  "people": [{"name": str, "role": str|null}],\n'
-            '  "companies": [{"name": str, "note": str|null}],\n'
-            '  "projects": [{"name": str, "note": str|null}],\n'
-            '  "beliefs": [{"text": str}],\n'
-            '  "topics": [{"name": str}],\n'
-            '  "relations": [{"src": str, "rel": str, "dst": str}]\n'
-            "}\n"
-            "Rules: include only entities clearly mentioned. Use SCREAMING_SNAKE_CASE "
-            'for relation types (e.g. "WORKS_WITH", "FOUNDED", "BELIEVES").\n'
-            "If a category is empty, return [].\n\n"
-            "TEXT:\n"
-            f"{text[:12000]}"
-        )
+
+        me_label = (user_display_name or "the user").strip()
+        prompt = f"""You build a first-person IDENTITY GRAPH for ONE human (referred to below as "{me_label}").
+The text was written by or about {me_label}. Extract entities ONLY through that lens
+— every entity must be personally meaningful to {me_label}, not just mentioned in passing.
+
+Return STRICT JSON (no prose, no markdown fences) with this shape:
+{{
+  "people":    [{{"name": str, "role": str|null, "relation": str|null}}],
+  "companies": [{{"name": str, "note": str|null, "relation": str|null}}],
+  "projects":  [{{"name": str, "note": str|null}}],
+  "beliefs":   [{{"text": str}}],
+  "topics":    [{{"name": str}}],
+  "tools":     [{{"name": str, "note": str|null}}],
+  "relations": [{{"src": str, "rel": str, "dst": str}}]
+}}
+
+CATEGORY RULES — read carefully, this is where most extractions go wrong:
+
+- companies: ONLY orgs {me_label} has a real personal stake in — founded, owns,
+  works at, has worked at, advises, or invests in. Set `relation` to one of:
+  FOUNDED, OWNS, WORKS_AT, WORKED_AT, ADVISES, INVESTS_IN, PARTNER_OF.
+  DO NOT include companies whose products {me_label} merely uses
+  (Apple, Google, Microsoft, Meta, OpenAI, Stripe, AWS, Slack, Notion…).
+  Those go in `tools` instead.
+
+- tools: products, platforms, SaaS, apps, frameworks, services, or social
+  networks {me_label} uses or has integrated with. Examples: Instagram,
+  Slack, Notion, Stripe, Figma, Cursor, Linear, ChatGPT, OpenRouter, AWS.
+  Even if it's "a company," if {me_label}'s relationship to it is *user-of*,
+  put it here, not in companies.
+
+- projects: concrete things {me_label} actively builds, ships, runs, or owns
+  (apps, products, initiatives, side projects). Different from companies:
+  a project lives inside or alongside a company.
+
+- people: humans {me_label} has a personal/professional relationship with
+  (co-founders, friends, family, clients, mentors). NOT public figures
+  merely cited. Add `relation` such as COFOUNDER, FRIEND, MENTOR, CLIENT.
+
+- beliefs: durable principles, opinions, values, mental models held by
+  {me_label}. Phrase as first-person statements. Skip one-off observations.
+
+- topics: subjects/domains {me_label} cares about, studies, or works in
+  (e.g. "AI agents", "founder mental health", "growth marketing").
+
+- relations: edges between any TWO named entities above. ALSO emit edges
+  rooting concepts back to {me_label} using the literal source name "Me"
+  (e.g. {{"src":"Me","rel":"FOUNDED","dst":"ShoutOut"}}). Use SCREAMING_SNAKE_CASE
+  relation types. Prefer specific verbs (FOUNDED, USES, BELIEVES, COFOUNDED_WITH,
+  RUNS, BUILDS, ADVISES, KNOWS) over generic ones.
+
+EXAMPLES of correct categorization:
+- "I built ShoutOut on Instagram for growth"  → companies:[{{"name":"ShoutOut","relation":"FOUNDED"}}], tools:[{{"name":"Instagram"}}], relations:[{{"src":"Me","rel":"FOUNDED","dst":"ShoutOut"}}, {{"src":"ShoutOut","rel":"DISTRIBUTES_ON","dst":"Instagram"}}]
+- "Met with Sarah from Acme"                  → people:[{{"name":"Sarah","relation":"KNOWS"}}], companies:[{{"name":"Acme","relation":"PARTNER_OF"}}], relations:[{{"src":"Sarah","rel":"WORKS_AT","dst":"Acme"}}]
+- "Working on a new pricing strategy"         → topics:[{{"name":"Pricing strategy"}}], relations:[{{"src":"Me","rel":"WORKING_ON","dst":"Pricing strategy"}}]
+
+If a category is empty, return [].
+
+TEXT:
+{text[:12000]}"""
         resp = await llm.ainvoke(prompt)
         raw = str(resp.content or "").strip()
 
@@ -253,8 +303,51 @@ def _slug(s: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in s.lower()).strip("_")[:80] or "x"
 
 
-async def _write_to_neo4j(user_id: str, ents: dict[str, Any]) -> tuple[int, int]:
-    """Upsert extracted entities and relations. Returns (nodes, edges) written."""
+# Per-category default relation from "Me" → entity. Lets us keep the graph
+# connected even when the LLM forgets to emit an explicit relation.
+_DEFAULT_REL: dict[str, str] = {
+    "Company": "AFFILIATED_WITH",
+    "Project": "RUNS",
+    "Belief":  "BELIEVES",
+    "Topic":   "INTERESTED_IN",
+    "Tool":    "USES",
+    "Person":  "KNOWS",
+}
+
+
+def _sanitize_rel(rel: str) -> str:
+    """Cypher relationship types must be valid identifiers — clean and uppercase."""
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in (rel or "").strip()).upper()
+    if not safe or safe[0].isdigit():
+        safe = f"R_{safe}" if safe else "RELATED_TO"
+    return safe
+
+
+async def _ensure_me_node(n4: JaiNeo4j, user_id: str, display_name: str | None) -> tuple[str, str]:
+    """Ensure a Person node representing the human exists. Returns (label, id)."""
+    me_id = f"me_{_slug(user_id)}"
+    props = {
+        "name": (display_name or "Me").strip() or "Me",
+        "is_me": True,
+    }
+    await n4.upsert_entity(user_id=user_id, label="Person", entity_id=me_id, properties=props)
+    return ("Person", me_id)
+
+
+async def _write_to_neo4j(
+    user_id: str,
+    ents: dict[str, Any],
+    *,
+    user_display_name: str | None = None,
+) -> tuple[int, int]:
+    """Upsert extracted entities and relations. Returns (nodes, edges) written.
+
+    Always ensures a "Me" node exists for the user and connects every other
+    entity back to it (using the LLM's relation when provided, falling back
+    to a sensible default per category). Relations whose endpoints weren't
+    pre-registered in the entity buckets get promoted to a generic Concept
+    node so we never silently drop an edge.
+    """
     if not ents:
         return 0, 0
     try:
@@ -265,55 +358,95 @@ async def _write_to_neo4j(user_id: str, ents: dict[str, Any]) -> tuple[int, int]
 
     nodes = 0
     edges = 0
-    name_to_label: dict[str, str] = {}
+    # name.lower() -> (label, id) — populated as we upsert.
+    name_index: dict[str, tuple[str, str]] = {}
 
-    async def upsert_collection(items: list[dict[str, Any]] | None, label: str) -> int:
-        if not isinstance(items, list):
-            return 0
-        count = 0
-        for it in items:
-            name = (it or {}).get("name") if label != "Belief" else (it or {}).get("text")
-            if not name or not isinstance(name, str):
+    async def add_node(name: str | None, label: str, extra: dict[str, Any] | None = None) -> tuple[str, str] | None:
+        if not name or not isinstance(name, str):
+            return None
+        clean = name.strip()
+        if not clean:
+            return None
+        entity_id = f"{label.lower()}_{_slug(clean)}"
+        props: dict[str, Any] = {"name": clean}
+        for k, v in (extra or {}).items():
+            if k in ("name", "relation") or v is None:
                 continue
-            entity_id = f"{label.lower()}_{_slug(name)}"
-            props: dict[str, Any] = {"name": name}
-            # Merge any extra optional fields (role/note) without clobbering.
-            for k, v in (it or {}).items():
-                if k != "name" and v is not None:
-                    props[k] = v
-            try:
-                await n4.upsert_entity(
-                    user_id=user_id, label=label, entity_id=entity_id, properties=props
-                )
-                name_to_label[name.lower()] = (label, entity_id)  # type: ignore[assignment]
-                count += 1
-            except Exception as e:
-                log.warning("neo4j.upsert_node_failed", label=label, error=str(e))
-        return count
+            props[k] = v
+        try:
+            await n4.upsert_entity(
+                user_id=user_id, label=label, entity_id=entity_id, properties=props
+            )
+            name_index[clean.lower()] = (label, entity_id)
+            return (label, entity_id)
+        except Exception as e:
+            log.warning("neo4j.upsert_node_failed", label=label, name=clean, error=str(e))
+            return None
 
     try:
-        nodes += await upsert_collection(ents.get("people"), "Person")
-        nodes += await upsert_collection(ents.get("companies"), "Company")
-        nodes += await upsert_collection(ents.get("projects"), "Project")
-        nodes += await upsert_collection(ents.get("beliefs"), "Belief")
-        nodes += await upsert_collection(ents.get("topics"), "Topic")
+        # Anchor every user's graph in a single "Me" Person node so all
+        # extracted entities can connect back to them.
+        me_label, me_id = await _ensure_me_node(n4, user_id, user_display_name)
+        nodes += 1
+        # Register both "me" and the user's display name so the LLM's relations
+        # work regardless of which spelling it used.
+        name_index["me"] = (me_label, me_id)
+        if user_display_name:
+            name_index[user_display_name.lower()] = (me_label, me_id)
 
-        for rel in ents.get("relations") or []:
-            src_name = (rel or {}).get("src")
-            dst_name = (rel or {}).get("dst")
-            rel_type = (rel or {}).get("rel")
-            if not (
-                isinstance(src_name, str)
-                and isinstance(dst_name, str)
-                and isinstance(rel_type, str)
-            ):
+        # --- collections in declared category order -----------------------
+        categories: list[tuple[str, str, str]] = [
+            # (key in ents, neo4j label, source-field-name)
+            ("people",    "Person",  "name"),
+            ("companies", "Company", "name"),
+            ("projects",  "Project", "name"),
+            ("beliefs",   "Belief",  "text"),
+            ("topics",    "Topic",   "name"),
+            ("tools",     "Tool",    "name"),
+        ]
+
+        # Track LLM-supplied per-entity relation suggestions for the Me-edge.
+        entity_rel_suggestion: dict[str, str] = {}
+
+        for key, label, field in categories:
+            items = ents.get(key)
+            if not isinstance(items, list):
                 continue
-            # Sanitize rel type — Cypher relationship types must be identifiers.
-            rel_safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in rel_type).upper()
-            if not rel_safe or rel_safe[0].isdigit():
-                rel_safe = f"R_{rel_safe}"
-            src = name_to_label.get(src_name.lower())
-            dst = name_to_label.get(dst_name.lower())
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                name = it.get(field)
+                added = await add_node(name, label, extra=it)
+                if added:
+                    nodes += 1
+                    rel_hint = it.get("relation") if isinstance(it.get("relation"), str) else None
+                    if rel_hint:
+                        entity_rel_suggestion[added[1]] = _sanitize_rel(rel_hint)
+
+        # --- explicit relations from the LLM -------------------------------
+        for rel in ents.get("relations") or []:
+            if not isinstance(rel, dict):
+                continue
+            src_name = rel.get("src")
+            dst_name = rel.get("dst")
+            rel_type = rel.get("rel")
+            if not (isinstance(src_name, str) and isinstance(dst_name, str) and isinstance(rel_type, str)):
+                continue
+            rel_safe = _sanitize_rel(rel_type)
+
+            # Resolve src/dst — if either side wasn't pre-registered, fall
+            # back to a generic Concept node so we keep the edge instead of
+            # silently dropping it.
+            src = name_index.get(src_name.lower())
+            if not src:
+                src = await add_node(src_name, "Concept")
+                if src:
+                    nodes += 1
+            dst = name_index.get(dst_name.lower())
+            if not dst:
+                dst = await add_node(dst_name, "Concept")
+                if dst:
+                    nodes += 1
             if not (src and dst):
                 continue
             try:
@@ -328,6 +461,27 @@ async def _write_to_neo4j(user_id: str, ents: dict[str, Any]) -> tuple[int, int]
                 edges += 1
             except Exception as e:
                 log.warning("neo4j.upsert_rel_failed", error=str(e))
+
+        # --- guarantee everything connects back to "Me" -------------------
+        # For any non-Me node that has no edge to Me yet, add a default
+        # relation so the user always sees their identity at the center of
+        # the graph instead of orphan clusters.
+        for (label, entity_id) in set(name_index.values()):
+            if entity_id == me_id:
+                continue
+            rel_safe = entity_rel_suggestion.get(entity_id) or _DEFAULT_REL.get(label) or "RELATED_TO"
+            try:
+                await n4.upsert_rel(
+                    user_id=user_id,
+                    src_label=me_label,
+                    src_id=me_id,
+                    rel_type=rel_safe,
+                    dst_label=label,
+                    dst_id=entity_id,
+                )
+                edges += 1
+            except Exception as e:
+                log.warning("neo4j.upsert_me_edge_failed", label=label, error=str(e))
     finally:
         try:
             await n4.close()
@@ -335,6 +489,32 @@ async def _write_to_neo4j(user_id: str, ents: dict[str, Any]) -> tuple[int, int]
             pass
 
     return nodes, edges
+
+
+async def _resolve_user_display_name(user_id: str) -> str | None:
+    """Best-effort fetch of the user's display name from Supabase auth metadata."""
+    try:
+        sb = supabase_admin()
+        res = (
+            sb.table("users")
+            .select("id, email, metadata")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if rows:
+            md = rows[0].get("metadata") or {}
+            for key in ("full_name", "display_name", "name"):
+                val = md.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            email = rows[0].get("email")
+            if isinstance(email, str) and "@" in email:
+                return email.split("@")[0]
+    except Exception as e:
+        log.warning("user.display_name_lookup_failed", error=str(e))
+    return None
 
 
 async def _extract_facts(text: str, max_facts: int = 12) -> list[str]:
@@ -511,9 +691,12 @@ async def _process_one(
         combined = "\n\n".join(graph_source)[:12000]
         if combined.strip():
             try:
-                ents = await _extract_entities(combined)
+                display = await _resolve_user_display_name(user_id)
+                ents = await _extract_entities(combined, user_display_name=display)
                 if ents:
-                    nodes_w, edges_w = await _write_to_neo4j(user_id, ents)
+                    nodes_w, edges_w = await _write_to_neo4j(
+                        user_id, ents, user_display_name=display
+                    )
                     log.info(
                         "ingest.graph_populated",
                         filename=filename,
@@ -891,10 +1074,11 @@ async def graph_rebuild(user: CurrentUserDep) -> dict[str, Any]:
         MAX_DOCS_PER_CALL = 8
         items = list(buckets.items())[:MAX_DOCS_PER_CALL]
 
+        display = await _resolve_user_display_name(user.user_id)
         for src, chunks in items:
             joined = "\n\n".join(chunks)[:12000]
             try:
-                ents = await _extract_entities(joined)
+                ents = await _extract_entities(joined, user_display_name=display)
             except Exception as e:
                 skipped.append(f"{src}: extract failed: {e}")
                 continue
@@ -902,7 +1086,9 @@ async def graph_rebuild(user: CurrentUserDep) -> dict[str, Any]:
                 skipped.append(f"{src}: no entities")
                 continue
             try:
-                n, e = await _write_to_neo4j(user.user_id, ents)
+                n, e = await _write_to_neo4j(
+                    user.user_id, ents, user_display_name=display
+                )
             except Exception as exc:
                 skipped.append(f"{src}: neo4j failed: {exc}")
                 continue
