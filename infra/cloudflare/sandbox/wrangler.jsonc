@@ -10,10 +10,12 @@
       "class_name": "Sandbox",
       // Reference the official Cloudflare Sandbox image directly from Docker
       // Hub so wrangler doesn't need a local Docker daemon to build/push.
-      // Skills install whatever extra Python packages they need at runtime
-      // via the prelude in src/index.ts (cached after first install per
-      // container instance).
-      "image": "docker.io/cloudflare/sandbox:0.7.0",
+      // CRITICAL: use the `-python` variant. The plain `cloudflare/sandbox`
+      // tag is JS-only and ships NO python interpreter — every Gmail-style
+      // skill fails with "python3: command not found" against the lean image.
+      // Skills install extra packages on first run via the prelude in
+      // src/index.ts (cached afterwards via marker file).
+      "image": "docker.io/cloudflare/sandbox:0.7.21-python",
       "instance_type": "lite",
       "max_instances": 8
     }
