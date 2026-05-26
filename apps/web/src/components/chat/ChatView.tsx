@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { useSWRConfig } from "swr";
 import { ChatSocket, type ServerMsg } from "@/lib/ws";
 import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
 import { api } from "@/lib/api";
@@ -49,6 +50,7 @@ type ServerMessageRow = {
 };
 
 export function ChatView() {
+  const { mutate } = useSWRConfig();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages());
   const [connected, setConnected] = useState(false);
   const [thinking, setThinking] = useState(false);
@@ -219,6 +221,24 @@ export function ChatView() {
         setConnected(true);
         // Anything that arrived while the socket was down — recover it.
         void recoverFromServer();
+        // Bridge: when the chat socket comes back, the right-rail
+        // panels (tasks/notes/KPIs) might also be stale because the
+        // user changed something on another device or a scheduled
+        // skill ran while we were offline. Force a revalidate across
+        // the panels SWR is responsible for. Realtime subs cover this
+        // too, but they can miss events during a long disconnect.
+        const refreshKeys = [
+          "/tasks",
+          "/tasks/lists",
+          "/notes",
+          "/kpis",
+          "/skills",
+          "/auth/accounts",
+        ];
+        for (const k of refreshKeys) {
+          mutate(k);
+          mutate((key) => typeof key === "string" && key.startsWith(k + "?"));
+        }
         // If we re-opened with a still-spinning "thinking" indicator,
         // the server-side turn has either finished (recoverFromServer
         // appended the assistant) or failed silently. Clear the spinner.
@@ -285,6 +305,10 @@ export function ChatView() {
     sock.connect();
     wsRef.current = sock;
     return () => sock.close();
+    // `mutate` from useSWRConfig is stable across renders (per swr docs)
+    // and we deliberately want this effect to run only once on mount —
+    // adding it would unnecessarily rebuild the WebSocket on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const send = (text: string) => {
