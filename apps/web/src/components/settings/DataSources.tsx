@@ -173,7 +173,7 @@ export function DataSources() {
         <section className="rounded-xl border border-[var(--line)] bg-[var(--bg-elev)] p-4 space-y-3">
           <div className="text-sm font-semibold">Connect a Supabase project</div>
           <div className="text-[11px] text-[var(--fg-mute)]">
-            Use the project's <span className="font-mono">service role</span> key (Project Settings → API). JAI encrypts it before storing.
+            Use the project&apos;s <span className="font-mono">service role</span> key (Project Settings → API). JAI encrypts it before storing.
           </div>
           <Field label="Project name">
             <input
