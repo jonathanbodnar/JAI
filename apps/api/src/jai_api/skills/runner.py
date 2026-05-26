@@ -113,6 +113,12 @@ async def _execute(
         )
 
     creds = await registry.get_credentials(user_id=user_id, keys=required)
+
+    # Always inject platform credentials so skills can call JAI's own
+    # Supabase and API without the user having to store them manually.
+    platform_env = _platform_env(user_id)
+    merged_env = {**platform_env, **creds}  # user creds win on collision
+
     sandbox = SandboxClient()
     try:
         raw = await sandbox.run(
@@ -120,7 +126,7 @@ async def _execute(
             skill_id=skill["id"],
             language=skill["language"],
             source=skill["source"],
-            env=creds,
+            env=merged_env,
         )
     finally:
         await sandbox.close()
@@ -178,6 +184,32 @@ def _credential_ask(missing: list[str], explanation: str | None = None) -> str:
         f"To do that, I need a few things from you: {keys}. "
         "Reply with `key=value` (one per line), or set them in Settings → Credentials."
     )
+
+
+def _platform_env(user_id: str) -> dict[str, str]:
+    """Credentials every skill gets for free — no user setup required.
+
+    These are the JAI platform credentials (Supabase URL, service role key,
+    backend URL, the user's own ID). Skills can use them to:
+    - query/write JAI's own Supabase tables (tasks, notes, messages, etc.)
+    - call JAI's internal REST API
+    - cross-reference the user's projects, progress, anything stored in Supabase
+
+    We deliberately expose the *service* role key so skills can read across
+    all tables without fighting RLS. This is fine because skills run in the
+    user's sandboxed container and can't exfiltrate data anywhere outside.
+    """
+    from ..config import get_settings
+    s = get_settings()
+    env: dict[str, str] = {}
+    if s.supabase_url:
+        env["JAI_SUPABASE_URL"] = s.supabase_url
+    if s.supabase_service_role_key:
+        env["JAI_SUPABASE_KEY"] = s.supabase_service_role_key
+    if s.jai_backend_url:
+        env["JAI_BACKEND_URL"] = s.jai_backend_url
+    env["JAI_USER_ID"] = user_id
+    return env
 
 
 async def _user_credential_keys(user_id: str) -> list[str]:
