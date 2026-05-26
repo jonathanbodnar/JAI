@@ -10,9 +10,39 @@ from pydantic import BaseModel
 from ..auth import CurrentUserDep
 from ..db import supabase_admin
 from ..skills import registry
+from ..skills.library import load_library
+from ..skills.library_seed import seed_user_library
 from ..skills.runner import run_intent
 
 router = APIRouter()
+
+
+@router.get("/library")
+async def list_library_skills() -> list[dict[str, Any]]:
+    """Return the curated library catalogue (the same for every user)."""
+    return [
+        {
+            "key": s.key,
+            "title": s.title,
+            "description": s.description,
+            "language": s.language,
+            "required_tools": s.required_tools,
+        }
+        for s in load_library()
+    ]
+
+
+class SeedLibraryIn(BaseModel):
+    only: list[str] | None = None  # optional subset of library keys
+
+
+@router.post("/library/seed")
+async def install_library(user: CurrentUserDep, body: SeedLibraryIn | None = None) -> dict:
+    """Install (or update) the bundled library skills for the current user."""
+    return await seed_user_library(
+        user_id=user.user_id,
+        only_keys=(body.only if body and body.only else None),
+    )
 
 
 @router.get("")

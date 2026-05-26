@@ -141,7 +141,23 @@ async def _execute(
     platform_env = _platform_env(user_id)
     sources_env = await _data_sources_env(user_id)
     accounts_env = await _connected_accounts_env(user_id)
-    merged_env = {**platform_env, **sources_env, **accounts_env, **creds}  # user creds win on collision
+
+    # Pass the user's raw intent + structured inputs so library skills
+    # (which can't have their source rewritten per call) still have
+    # access to the request context.
+    import json as _json
+    intent_env = {
+        "JAI_USER_INTENT": (inputs.get("intent") if isinstance(inputs, dict) else "") or "",
+        "JAI_SKILL_INPUTS_JSON": _json.dumps(inputs or {}),
+    }
+
+    merged_env = {
+        **platform_env,
+        **sources_env,
+        **accounts_env,
+        **intent_env,
+        **creds,  # user creds win on collision
+    }
 
     sandbox = SandboxClient()
     try:
