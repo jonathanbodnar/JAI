@@ -167,8 +167,25 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
   let install_log = "";
 
   try {
-    const sb = getSandbox(env.Sandbox, body.user_id);
+    let sb = getSandbox(env.Sandbox, body.user_id);
     await sb.mkdir("/workspace", { recursive: true });
+
+    // Pre-flight: make sure the container actually has the runtime we
+    // need. Cloudflare DO containers persist across requests, so if the
+    // container booted under an old image variant (e.g. pre-python),
+    // every subsequent /run sees the stale binary set. Destroy + recreate
+    // when that happens.
+    const needsFresh = await containerLacksRuntime(sb, body.language);
+    if (needsFresh) {
+      try {
+        await sb.destroy();
+      } catch {
+        /* best effort */
+      }
+      sb = getSandbox(env.Sandbox, body.user_id);
+      // Re-mkdir; the new container has a fresh filesystem.
+      await sb.mkdir("/workspace", { recursive: true });
+    }
 
     // Env vars come via a JSON file so OAuth blobs / multi-line values don't
     // get mangled by bash. The prelude (prepended below) reads this file
@@ -248,6 +265,31 @@ async function ensureDepsInstalled(
   }
 
   return "";
+}
+
+// Verify the container has the language runtime we expect. Used to detect
+// stale containers running an old image variant after a deploy that
+// changed the base image — we destroy + recreate to pick up the new image.
+async function containerLacksRuntime(
+  sb: ReturnType<typeof getSandbox>,
+  language: keyof typeof FILE_BY_LANG,
+): Promise<boolean> {
+  const probe =
+    language === "python"
+      ? "command -v python3"
+      : language === "typescript"
+        ? "command -v node"
+        : "command -v bash";
+  try {
+    const res = await sb.exec(probe, { timeout: 8_000 });
+    const found = (res.stdout ?? "").trim();
+    // If `command -v` printed a path, the runtime exists. Anything else
+    // (empty output, non-zero exit) means it's missing.
+    return !found;
+  } catch {
+    // Container unreachable — treat as stale so we rebuild.
+    return true;
+  }
 }
 
 async function markerExists(
