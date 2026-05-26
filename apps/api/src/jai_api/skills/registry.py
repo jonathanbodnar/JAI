@@ -48,6 +48,14 @@ async def save_skill(
     return res.data[0]
 
 
+async def set_active(*, user_id: str, skill_id: str, is_active: bool) -> None:
+    """Toggle is_active. Used by the dedup path to revive a near-match."""
+    sb = supabase_admin()
+    sb.table("skills").update({"is_active": is_active}).eq("user_id", user_id).eq(
+        "id", skill_id
+    ).execute()
+
+
 async def get_skill(*, user_id: str, skill_id: str) -> dict | None:
     sb = supabase_admin()
     res = (

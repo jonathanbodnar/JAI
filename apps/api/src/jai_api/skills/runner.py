@@ -88,6 +88,39 @@ async def run_intent(
             final_text="I couldn't build a skill for that — could you rephrase what you want me to do?"
         )
 
+    # Last-mile dedup. Even after a permissive match miss, the builder's
+    # output description embeds much more cleanly than the user's raw
+    # phrasing, so an additional similarity check against the whole
+    # skill library (including archived ones) catches the case where
+    # the LLM just regenerated something we already have.
+    twin = await matcher.match_for_dedup(
+        user_id=user_id,
+        title=draft.title,
+        description=draft.description,
+    )
+    if twin:
+        log.info(
+            "skill.dedup.hit",
+            twin_id=twin["id"],
+            twin_title=twin.get("title"),
+            sim=twin.get("similarity"),
+            was_active=twin.get("is_active"),
+        )
+        # Reactivate if it was archived — that's better than ignoring
+        # the user's existing library and forcing a regeneration.
+        if not twin.get("is_active"):
+            try:
+                await registry.set_active(user_id=user_id, skill_id=twin["id"], is_active=True)
+                twin["is_active"] = True
+            except Exception as e:
+                log.warning("skill.reactivate_failed", error=str(e))
+        return await _execute(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            skill=twin,
+            inputs={"intent": intent},
+        )
+
     saved = await registry.save_skill(
         user_id=user_id,
         title=draft.title,
