@@ -4,14 +4,13 @@ import { ChatSocket, type ServerMsg } from "@/lib/ws";
 import { PressRecorder, StreamingAudioPlayer } from "@/lib/voice";
 import { api } from "@/lib/api";
 import Link from "next/link";
-import { Settings, Trash2 } from "lucide-react";
+import { Settings, Trash2, BrainCircuit } from "lucide-react";
 import { MessageList, type Message } from "./MessageList";
 import { Composer } from "./Composer";
-import { PushToTalk } from "./PushToTalk";
 import { cn } from "@/lib/cn";
 
 const CHAT_KEY = "jai.chat.messages.v1";
-const CHAT_MAX = 500; // cap so localStorage doesn't blow up
+const CHAT_MAX = 500;
 
 function loadMessages(): Message[] {
   if (typeof window === "undefined") return [];
@@ -31,20 +30,15 @@ function saveMessages(msgs: Message[]) {
     const trimmed = msgs.slice(-CHAT_MAX);
     localStorage.setItem(CHAT_KEY, JSON.stringify(trimmed));
   } catch {
-    // quota exceeded → drop oldest half and retry once
     try {
       localStorage.setItem(CHAT_KEY, JSON.stringify(msgs.slice(-Math.floor(CHAT_MAX / 2))));
     } catch {
-      // give up; chat continues, just not persisted
+      // quota exceeded; give up
     }
   }
 }
 
 export function ChatView() {
-  // Hydrate from localStorage so the conversation survives tab switches,
-  // PWA backgrounding, or accidental reloads. The backend's LangGraph
-  // checkpointer is the source of truth long-term; we'll wire history
-  // sync from there later.
   const [messages, setMessages] = useState<Message[]>(() => loadMessages());
   const [connected, setConnected] = useState(false);
   const [thinking, setThinking] = useState(false);
@@ -53,7 +47,6 @@ export function ChatView() {
   const recRef = useRef<PressRecorder | null>(null);
   const playerRef = useRef<StreamingAudioPlayer | null>(null);
 
-  // Persist on every change.
   useEffect(() => {
     saveMessages(messages);
   }, [messages]);
@@ -114,7 +107,6 @@ export function ChatView() {
     setRecording(true);
     try {
       await recRef.current.start();
-      // Tell the server we're about to send one audio blob.
       wsRef.current.sendAudioStart();
     } catch (e) {
       setMessages((prev) => [
@@ -151,19 +143,38 @@ export function ChatView() {
   };
 
   return (
-    <div className="flex flex-col h-full">
-      <header className="safe-top px-4 py-3 border-b border-[var(--line)] flex items-center justify-between">
-        <h1 className="text-base font-semibold tracking-tight">JAI</h1>
-        <div className="flex items-center gap-3 text-xs text-[var(--fg-mute)]">
-          <div className="flex items-center gap-2">
+    <div className="flex flex-col h-full bg-[#131314] select-none relative">
+      {/* Top Header */}
+      <header className="safe-top px-6 py-4 flex items-center justify-between border-b border-[#2d2f31] bg-[#131314]/80 backdrop-blur-xl z-20">
+        <div className="flex items-center gap-3">
+          {/* Logo */}
+          <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-[#7c5cff] via-[#9b76ff] to-[#f43f5e] shadow-[0_0_15px_rgba(124,92,255,0.3)] shrink-0">
+            <BrainCircuit size={18} className="text-white" />
+          </div>
+          {/* Model selector mimic */}
+          <div className="flex flex-col">
+            <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-1.5">
+              JAI
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] font-bold text-zinc-300 border border-zinc-700/50 uppercase">
+                Flash 2.0
+              </span>
+            </h1>
+          </div>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex items-center gap-4 text-xs text-[#8e918f]">
+          {/* Realtime WS Indicator */}
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-[#1e1f20] border border-[#2d2f31] text-[11px] font-medium">
             <span
               className={cn(
-                "h-2 w-2 rounded-full",
-                connected ? "bg-[var(--ok)]" : "bg-[var(--fg-dim)]"
+                "h-2 w-2 rounded-full transition-transform duration-300",
+                connected ? "bg-emerald-400 shadow-[0_0_8px_#34d399]" : "bg-[#8e918f]"
               )}
             />
-            {connected ? "live" : "connecting…"}
+            {connected ? "Live" : "Connecting…"}
           </div>
+
           {messages.length > 0 && (
             <button
               onClick={async () => {
@@ -182,28 +193,35 @@ export function ChatView() {
                 }
               }}
               aria-label="Clear chat"
-              className="text-[var(--fg-mute)] hover:text-white"
+              className="p-1.5 rounded-full hover:bg-zinc-800/40 text-[#8e918f] hover:text-white transition-all border border-transparent hover:border-[#2d2f31]"
               title="Clear chat + reset JAI's working memory"
             >
               <Trash2 size={16} />
             </button>
           )}
-          <Link href="/settings" aria-label="Settings" className="text-[var(--fg-mute)] hover:text-white">
-            <Settings size={18} />
+
+          <Link
+            href="/settings"
+            aria-label="Settings"
+            className="p-1.5 rounded-full hover:bg-zinc-800/40 text-[#8e918f] hover:text-white transition-all border border-transparent hover:border-[#2d2f31]"
+          >
+            <Settings size={17} />
           </Link>
         </div>
       </header>
 
-      <MessageList messages={messages} thinking={thinking} />
+      {/* Message List */}
+      <MessageList messages={messages} thinking={thinking} onSend={send} />
 
-      <div className="border-t border-[var(--line)] bg-[var(--bg-elev)]">
-        <div className="px-3 py-3 flex items-end gap-2">
-          <Composer onSend={send} disabled={!connected} />
-          <PushToTalk
-            recording={recording}
+      {/* Centered Pill Input Pack */}
+      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-[#131314] via-[#131314]/90 to-transparent pt-12 pb-24 md:pb-6 z-10 pointer-events-none">
+        <div className="pointer-events-auto">
+          <Composer
+            onSend={send}
             disabled={!connected}
-            onStart={onTalkStart}
-            onEnd={onTalkEnd}
+            recording={recording}
+            onTalkStart={onTalkStart}
+            onTalkEnd={onTalkEnd}
           />
         </div>
       </div>

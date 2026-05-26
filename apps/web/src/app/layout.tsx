@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "@xyflow/react/dist/style.css";
 import { BottomNav } from "@/components/nav/BottomNav";
+import { Sidebar } from "@/components/nav/Sidebar";
 import { AuthGate } from "@/lib/auth-gate";
 import { OnboardingGate } from "@/components/onboarding/Onboarding";
 import { ServiceWorkerTamer } from "@/lib/sw-tame";
@@ -37,12 +38,15 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="flex flex-col h-dvh overflow-hidden">
+      <body className="flex flex-col md:flex-row h-dvh overflow-hidden bg-[#131314] text-[#ececef]">
         <ServiceWorkerTamer />
         <AuthGate>
           <OnboardingGate>
-            <main className="flex-1 overflow-hidden relative">{children}</main>
-            <BottomNav />
+            <Sidebar />
+            <div className="flex-1 flex flex-col overflow-hidden relative">
+              <main className="flex-1 overflow-hidden relative">{children}</main>
+              <BottomNav />
+            </div>
           </OnboardingGate>
         </AuthGate>
       </body>
