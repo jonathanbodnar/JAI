@@ -220,40 +220,98 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
 // instance; the marker file persists for the lifetime of the DO. Returns
 // a (possibly empty) log string when an install actually ran or failed
 // so callers can include it in user-facing diagnostics.
+//
+// Uses startProcess() + waitForExit() instead of exec() so the
+// Worker → DO HTTP call doesn't get killed by Cloudflare's ~30s
+// subrequest limit on a long-running pip/npm install. waitForExit
+// polls the DO and survives transient network blips.
 async function ensureDepsInstalled(
   sb: ReturnType<typeof getSandbox>,
   language: keyof typeof FILE_BY_LANG,
 ): Promise<string> {
   if (language === "python") {
-    // Skip if already done.
-    const check = await sb.exec(`test -f ${PIP_MARKER} && echo HIT || echo MISS`, {
-      timeout: 5_000,
-    });
-    if ((check.stdout ?? "").trim() === "HIT") return "";
+    const hit = await markerExists(sb, PIP_MARKER);
+    if (hit) return "";
 
     const pkgs = PIP_PACKAGES.join(" ");
-    const cmd = `python3 -m pip install --no-cache-dir --disable-pip-version-check ${pkgs} 2>&1 && touch ${PIP_MARKER}`;
-    const res = await sb.exec(cmd, { timeout: 240_000 });
-    const log = (res.stdout ?? "") + (res.stderr ?? "");
-    const ok = res.exitCode === 0 || res.success;
-    return ok ? "" : `pip install FAILED (exit ${res.exitCode ?? "?"}):\n${log}`;
+    const cmd = `bash -lc 'python3 -m pip install --no-cache-dir --disable-pip-version-check ${pkgs} && touch ${PIP_MARKER}'`;
+    return await runInstallProcess(sb, cmd, "pip install");
   }
 
   if (language === "typescript") {
-    const check = await sb.exec(`test -f ${NPM_MARKER} && echo HIT || echo MISS`, {
-      timeout: 5_000,
-    });
-    if ((check.stdout ?? "").trim() === "HIT") return "";
+    const hit = await markerExists(sb, NPM_MARKER);
+    if (hit) return "";
 
     const pkgs = NPM_PACKAGES.join(" ");
-    const cmd = `npm install -g ${pkgs} 2>&1 && touch ${NPM_MARKER}`;
-    const res = await sb.exec(cmd, { timeout: 180_000 });
-    const log = (res.stdout ?? "") + (res.stderr ?? "");
-    const ok = res.exitCode === 0 || res.success;
-    return ok ? "" : `npm install FAILED (exit ${res.exitCode ?? "?"}):\n${log}`;
+    const cmd = `bash -lc 'npm install -g ${pkgs} && touch ${NPM_MARKER}'`;
+    return await runInstallProcess(sb, cmd, "npm install");
   }
 
   return "";
+}
+
+async function markerExists(
+  sb: ReturnType<typeof getSandbox>,
+  marker: string,
+): Promise<boolean> {
+  try {
+    const res = await sb.exec(`test -f ${marker} && echo HIT || echo MISS`, {
+      timeout: 8_000,
+    });
+    return (res.stdout ?? "").trim() === "HIT";
+  } catch {
+    // If even the test command can't reach the container, assume not
+    // installed — the actual install will surface the real error.
+    return false;
+  }
+}
+
+async function runInstallProcess(
+  sb: ReturnType<typeof getSandbox>,
+  cmd: string,
+  label: string,
+): Promise<string> {
+  let proc;
+  try {
+    proc = await sb.startProcess(cmd);
+  } catch (e) {
+    return `${label} could not start: ${(e as Error)?.message || String(e)}`;
+  }
+
+  let exitResult;
+  try {
+    exitResult = await proc.waitForExit(300_000); // 5 min ceiling
+  } catch (e) {
+    // Connection blip — try once more by polling getStatus()
+    const msg = (e as Error)?.message || String(e);
+    try {
+      const status = await proc.getStatus();
+      const logs = await proc.getLogs();
+      return `${label} wait failed (${msg}); last status: ${status}\n${truncate(
+        (logs.stdout ?? "") + (logs.stderr ?? ""),
+        4000,
+      )}`;
+    } catch {
+      return `${label} wait failed and status unrecoverable: ${msg}`;
+    }
+  }
+
+  const ok = exitResult.exitCode === 0;
+  if (ok) return "";
+
+  let logs = { stdout: "", stderr: "" };
+  try {
+    logs = await proc.getLogs();
+  } catch {
+    /* ignore */
+  }
+  const tail = truncate((logs.stdout ?? "") + (logs.stderr ?? ""), 4000);
+  return `${label} FAILED (exit ${exitResult.exitCode ?? "?"}):\n${tail}`;
+}
+
+function truncate(s: string, n: number): string {
+  if (!s) return "";
+  return s.length <= n ? s : s.slice(-n);
 }
 
 function parseLastJson(s: string): { status?: string; result?: unknown; error?: string } | null {
