@@ -303,6 +303,48 @@ def _slug(s: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in s.lower()).strip("_")[:80] or "x"
 
 
+# Filler phrases people use when stating beliefs. Stripped before slugging so
+# "I believe that growth comes from focus" and "Growth comes from focus" land
+# on the same node instead of two near-duplicates.
+_BELIEF_PREFIXES = (
+    "i believe that ",
+    "i believe ",
+    "my belief is that ",
+    "my belief is ",
+    "i hold that ",
+    "i think that ",
+    "i think ",
+    "i feel that ",
+    "i feel ",
+    "my view is that ",
+    "my view is ",
+    "my principle is that ",
+    "my principle is ",
+    "i value ",
+    "it's important that ",
+    "it is important that ",
+    "the key is that ",
+    "the key is ",
+)
+
+
+def _normalize_belief_text(text: str) -> str:
+    """Strip filler words and trailing punctuation so similar beliefs slug the same."""
+    t = (text or "").strip().lower()
+    if not t:
+        return ""
+    changed = True
+    # Repeatedly strip stacked prefixes ("I believe that I think...").
+    while changed:
+        changed = False
+        for p in _BELIEF_PREFIXES:
+            if t.startswith(p):
+                t = t[len(p):]
+                changed = True
+                break
+    return t.rstrip(".!?,;:").strip()
+
+
 # Per-category default relation from "Me" → entity. Lets us keep the graph
 # connected even when the LLM forgets to emit an explicit relation.
 _DEFAULT_REL: dict[str, str] = {
@@ -339,7 +381,7 @@ async def _write_to_neo4j(
     ents: dict[str, Any],
     *,
     user_display_name: str | None = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, set[tuple[str, str]]]:
     """Upsert extracted entities and relations. Returns (nodes, edges) written.
 
     Always ensures a "Me" node exists for the user and connects every other
@@ -349,17 +391,20 @@ async def _write_to_neo4j(
     node so we never silently drop an edge.
     """
     if not ents:
-        return 0, 0
+        return 0, 0, set()
     try:
         n4 = JaiNeo4j()
     except Exception as e:
         log.warning("neo4j.init_failed", error=str(e))
-        return 0, 0
+        return 0, 0, set()
 
     nodes = 0
     edges = 0
     # name.lower() -> (label, id) — populated as we upsert.
     name_index: dict[str, tuple[str, str]] = {}
+    # Every (label, id) we touched in this run — used for document
+    # provenance edges and the cross-concept LLM pass.
+    touched: set[tuple[str, str]] = set()
 
     async def add_node(name: str | None, label: str, extra: dict[str, Any] | None = None) -> tuple[str, str] | None:
         if not name or not isinstance(name, str):
@@ -367,7 +412,9 @@ async def _write_to_neo4j(
         clean = name.strip()
         if not clean:
             return None
-        entity_id = f"{label.lower()}_{_slug(clean)}"
+        # Beliefs slug off normalized text so wording variants collapse.
+        slug_input = _normalize_belief_text(clean) if label == "Belief" else clean
+        entity_id = f"{label.lower()}_{_slug(slug_input)}"
         props: dict[str, Any] = {"name": clean}
         for k, v in (extra or {}).items():
             if k in ("name", "relation") or v is None:
@@ -378,6 +425,7 @@ async def _write_to_neo4j(
                 user_id=user_id, label=label, entity_id=entity_id, properties=props
             )
             name_index[clean.lower()] = (label, entity_id)
+            touched.add((label, entity_id))
             return (label, entity_id)
         except Exception as e:
             log.warning("neo4j.upsert_node_failed", label=label, name=clean, error=str(e))
@@ -388,6 +436,7 @@ async def _write_to_neo4j(
         # extracted entities can connect back to them.
         me_label, me_id = await _ensure_me_node(n4, user_id, user_display_name)
         nodes += 1
+        touched.add((me_label, me_id))
         # Register both "me" and the user's display name so the LLM's relations
         # work regardless of which spelling it used.
         name_index["me"] = (me_label, me_id)
@@ -488,7 +537,177 @@ async def _write_to_neo4j(
         except Exception:
             pass
 
-    return nodes, edges
+    return nodes, edges, touched
+
+
+# --- document anchor + cross-concept inference --------------------------
+
+
+async def _anchor_to_document(
+    user_id: str,
+    *,
+    doc_id: str,
+    filename: str,
+    created_at: str | None,
+    kind: str | None,
+    entities: set[tuple[str, str]],
+) -> int:
+    """Create a :Document node for this ingest and connect every extracted
+    entity to it with `MENTIONED_IN`. Lets the graph cluster by source so the
+    user can see which beliefs came from which file/period.
+    """
+    if not entities:
+        return 0
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        log.warning("neo4j.init_failed", error=str(e))
+        return 0
+    doc_node_id = f"document_{_slug(doc_id)}"
+    written = 0
+    try:
+        await n4.upsert_entity(
+            user_id=user_id,
+            label="Document",
+            entity_id=doc_node_id,
+            properties={
+                "name": filename,
+                "created_at": created_at,
+                "kind": kind or "document",
+                "doc_id": doc_id,
+            },
+        )
+        for (label, ent_id) in entities:
+            if label == "Document":
+                continue
+            try:
+                await n4.upsert_rel(
+                    user_id=user_id,
+                    src_label=label,
+                    src_id=ent_id,
+                    rel_type="MENTIONED_IN",
+                    dst_label="Document",
+                    dst_id=doc_node_id,
+                    properties={"first_seen_at": created_at} if created_at else None,
+                )
+                written += 1
+            except Exception as e:
+                log.warning("neo4j.doc_edge_failed", error=str(e))
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
+    return written
+
+
+async def _link_concept_network(user_id: str, *, max_nodes: int = 60) -> int:
+    """Second-pass LLM call that emits conceptual edges BETWEEN beliefs,
+    principles, topics, projects, and concepts the user has accumulated.
+
+    This is what turns the graph from a hub-and-spoke around "Me" into an
+    actual web of interconnected ideas, and is the place to look when you
+    want to understand which beliefs build on / contradict / imply others.
+    """
+    try:
+        n4 = JaiNeo4j()
+    except Exception as e:
+        log.warning("neo4j.init_failed", error=str(e))
+        return 0
+    written = 0
+    try:
+        rows = await n4.fetch_recent_concepts(user_id, limit=max_nodes)
+        if len(rows) < 3:
+            return 0
+
+        id_to_label: dict[str, str] = {r["id"]: r["label"] for r in rows}
+        listing = "\n".join(
+            f"[{r['id']}] ({r['label']}) {r['name']}"
+            for r in rows
+            if r.get("name")
+        )
+
+        from ..config import get_settings
+        from ..models.openrouter import openrouter_chat
+
+        s = get_settings()
+        llm = openrouter_chat(
+            model=s.jai_model_orchestrator,
+            settings=s,
+            temperature=0.1,
+            streaming=False,
+        )
+        prompt = (
+            "These are nodes in a single human's identity graph — beliefs, "
+            "principles, topics, projects, and concepts. Find pairs that have "
+            "a CLEAR conceptual relationship and emit edges between them.\n\n"
+            "Edge types — pick the most specific one that fits:\n"
+            "  BUILDS_ON      — node B is an extension or refinement of node A\n"
+            "  IMPLIES        — node A logically leads to or supports node B\n"
+            "  CONTRADICTS    — node A and node B are in real tension\n"
+            "  EXAMPLE_OF     — node A is a concrete instance of the broader idea B\n"
+            "  SIMILAR_TO     — restate of the same idea, but worth linking\n"
+            "  RELATED_TO     — general conceptual link (use sparingly)\n\n"
+            "Rules:\n"
+            "- Only emit edges that add real INSIGHT. Skip trivial connections.\n"
+            "- Do not emit edges where src == dst.\n"
+            "- Use the literal [id] strings from the list as src/dst.\n"
+            "- Aim for the strongest 10-30 edges. Quality over quantity.\n\n"
+            "Return STRICT JSON (no prose, no markdown fences):\n"
+            "{\"edges\": [{\"src\": \"<id>\", \"rel\": \"BUILDS_ON\", \"dst\": \"<id>\"}]}\n\n"
+            f"NODES:\n{listing}"
+        )
+        resp = await llm.ainvoke(prompt)
+        raw = str(resp.content or "").strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].lstrip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(raw[start : end + 1])
+                except json.JSONDecodeError:
+                    return 0
+            else:
+                return 0
+
+        for e in data.get("edges") or []:
+            if not isinstance(e, dict):
+                continue
+            sid = e.get("src")
+            did = e.get("dst")
+            rel = e.get("rel")
+            if not (isinstance(sid, str) and isinstance(did, str) and isinstance(rel, str)):
+                continue
+            if sid == did or sid not in id_to_label or did not in id_to_label:
+                continue
+            rel_safe = _sanitize_rel(rel)
+            try:
+                await n4.upsert_rel(
+                    user_id=user_id,
+                    src_label=id_to_label[sid],
+                    src_id=sid,
+                    rel_type=rel_safe,
+                    dst_label=id_to_label[did],
+                    dst_id=did,
+                )
+                written += 1
+            except Exception as exc:
+                log.warning("neo4j.cross_link_failed", error=str(exc))
+        log.info("graph.cross_links_written", count=written, candidates=len(rows))
+    except Exception as e:
+        log.warning("graph.cross_link_pass_failed", error=str(e))
+    finally:
+        try:
+            await n4.close()
+        except Exception:
+            pass
+    return written
 
 
 async def _resolve_user_display_name(user_id: str) -> str | None:
@@ -694,7 +913,7 @@ async def _process_one(
                 display = await _resolve_user_display_name(user_id)
                 ents = await _extract_entities(combined, user_display_name=display)
                 if ents:
-                    nodes_w, edges_w = await _write_to_neo4j(
+                    nodes_w, edges_w, touched = await _write_to_neo4j(
                         user_id, ents, user_display_name=display
                     )
                     log.info(
@@ -703,6 +922,39 @@ async def _process_one(
                         nodes=nodes_w,
                         edges=edges_w,
                     )
+                    # Anchor everything we just extracted to this document so
+                    # the graph clusters by source (and we can see what beliefs
+                    # came from which file / period).
+                    try:
+                        doc_row = (
+                            sb.table("documents")
+                            .select("created_at, kind")
+                            .eq("id", doc_id)
+                            .single()
+                            .execute()
+                        )
+                        meta = doc_row.data or {}
+                    except Exception:
+                        meta = {}
+                    try:
+                        doc_edges = await _anchor_to_document(
+                            user_id,
+                            doc_id=doc_id,
+                            filename=filename,
+                            created_at=meta.get("created_at"),
+                            kind=meta.get("kind"),
+                            entities=touched,
+                        )
+                        log.info("ingest.doc_anchored", edges=doc_edges)
+                    except Exception as e:
+                        log.warning("ingest.doc_anchor_failed", error=str(e))
+                    # Cross-link beliefs/concepts so the graph stops being
+                    # 500 isolated dots and starts being a web of ideas.
+                    try:
+                        cross = await _link_concept_network(user_id)
+                        log.info("ingest.cross_linked", edges=cross)
+                    except Exception as e:
+                        log.warning("ingest.cross_link_failed", error=str(e))
             except Exception as e:
                 log.warning("ingest.graph_failed", error=str(e))
 
@@ -1086,7 +1338,7 @@ async def graph_rebuild(user: CurrentUserDep) -> dict[str, Any]:
                 skipped.append(f"{src}: no entities")
                 continue
             try:
-                n, e = await _write_to_neo4j(
+                n, e, _touched = await _write_to_neo4j(
                     user.user_id, ents, user_display_name=display
                 )
             except Exception as exc:
@@ -1096,6 +1348,15 @@ async def graph_rebuild(user: CurrentUserDep) -> dict[str, Any]:
             total_edges += e
             docs_seen += 1
             log.info("graph.rebuild.doc", source=src, nodes=n, edges=e)
+
+        # After (re)extracting from every doc this batch handled, run a single
+        # cross-concept inference pass to weave the beliefs/topics together.
+        try:
+            cross = await _link_concept_network(user.user_id)
+            total_edges += cross
+            log.info("graph.rebuild.cross_linked", edges=cross)
+        except Exception as e:
+            log.warning("graph.rebuild.cross_link_failed", error=str(e))
 
         try:
             await audit_write(

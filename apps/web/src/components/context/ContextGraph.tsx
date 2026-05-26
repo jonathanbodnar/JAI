@@ -41,6 +41,7 @@ const ALL_TYPES = [
   "Topic",
   "Tool",
   "Concept",
+  "Document",
   "Decision",
   "Pattern",
   "Skill",
@@ -58,6 +59,7 @@ const labelColors: Record<string, string> = {
   Topic: "#94a3b8",
   Tool: "#ec4899",
   Concept: "#64748b",
+  Document: "#d97706",
   Conversation: "#475569",
 };
 

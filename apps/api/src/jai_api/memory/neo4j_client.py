@@ -162,6 +162,28 @@ class JaiNeo4j:
                 out.append({"node": node, "edges": edges})
         return out
 
+    async def fetch_recent_concepts(self, user_id: str, limit: int = 60) -> list[dict]:
+        """Return the user's most recently touched concept-like nodes for the
+        cross-link inference pass.
+
+        Skips the Me node and external Documents (those are anchors, not
+        targets for conceptual edges)."""
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.user_id = $uid "
+            "  AND labels(n)[0] IN ['Belief','Topic','Project','Concept','Company','Tool','Pattern','Skill','Decision'] "
+            "  AND coalesce(n.is_me, false) = false "
+            "RETURN labels(n)[0] AS label, n.id AS id, coalesce(n.name, '') AS name "
+            "ORDER BY coalesce(n.updated_at, datetime()) DESC "
+            "LIMIT $limit"
+        )
+        out: list[dict] = []
+        async with self._driver.session(database=self._db) as sess:
+            res = await sess.run(cypher, uid=user_id, limit=limit)
+            async for rec in res:
+                out.append({"label": rec["label"], "id": rec["id"], "name": rec["name"]})
+        return out
+
     async def graph_dump(self, user_id: str, limit: int = 200) -> dict:
         """Used by the Context panel to render the whole user graph."""
         cypher_nodes = (
