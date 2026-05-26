@@ -121,7 +121,11 @@ async def _current_run_count(user_id: str, skill_id: str) -> int:
 
 
 async def get_credentials(*, user_id: str, keys: list[str]) -> dict[str, str]:
-    """Return {key: plaintext} for the credentials the skill needs."""
+    """Return {key: plaintext} for the credentials the skill needs.
+
+    `value_encrypted` is stored as TEXT (Fernet tokens are URL-safe ASCII),
+    so we just utf-8 encode it back to bytes for `decrypt`.
+    """
     if not keys:
         return {}
     sb = supabase_admin()
@@ -136,12 +140,11 @@ async def get_credentials(*, user_id: str, keys: list[str]) -> dict[str, str]:
     for row in res.data or []:
         try:
             blob = row["value_encrypted"]
-            # Supabase returns bytea as base64 string or memoryview depending on
-            # client version; normalize.
             if isinstance(blob, str):
-                import base64
-                blob = base64.b64decode(blob.removeprefix("\\x").encode()) if blob.startswith("\\x") else base64.b64decode(blob)
-            out[row["key"]] = decrypt(bytes(blob))
+                token = blob.encode("ascii")
+            else:
+                token = bytes(blob)
+            out[row["key"]] = decrypt(token)
         except Exception as e:
             log.error("credential.decrypt_failed", key=row["key"], error=str(e))
     return out
@@ -149,7 +152,9 @@ async def get_credentials(*, user_id: str, keys: list[str]) -> dict[str, str]:
 
 async def set_credential(*, user_id: str, key: str, value: str, metadata: dict | None = None) -> None:
     sb = supabase_admin()
-    enc = encrypt(value)
+    # Fernet output is already URL-safe ASCII; store as TEXT so PostgREST/JSON
+    # round-trips trivially (no bytea / base64 dance).
+    enc = encrypt(value).decode("ascii")
     sb.table("skill_credentials").upsert(
         {
             "user_id": user_id,
