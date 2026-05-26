@@ -54,6 +54,12 @@ const FILE_BY_LANG = {
 const ENV_FILE = "/workspace/.env.json";
 const PIP_MARKER = "/workspace/.pip-installed";
 const NPM_MARKER = "/workspace/.npm-installed";
+// Install Python packages to an explicit /workspace path instead of the
+// system site-packages. The Cloudflare base image runs as a non-root user
+// and uses a python-build-standalone distribution, so `pip install`
+// without --target lands somewhere python3 can't import from. The
+// prelude prepends this directory to sys.path so installs are visible.
+const PIP_TARGET = "/workspace/.pylibs";
 
 // Packages JAI skills routinely need. Installed once per container
 // instance (cached via marker file). Keep the list lean — broader sets
@@ -75,7 +81,8 @@ const NPM_PACKAGES = ["tsx", "typescript"];
 // pre-step that runs visibly so errors surface to the user immediately.
 const PRELUDE: Record<keyof typeof FILE_BY_LANG, string> = {
   python:
-    "import os, json\n" +
+    "import sys, os, json\n" +
+    `sys.path.insert(0, ${JSON.stringify(PIP_TARGET)})\n` +
     "try:\n" +
     `    with open(${JSON.stringify(ENV_FILE)}) as _f:\n` +
     "        for _k, _v in json.load(_f).items():\n" +
@@ -251,8 +258,18 @@ async function ensureDepsInstalled(
     if (hit) return "";
 
     const pkgs = PIP_PACKAGES.join(" ");
-    const cmd = `bash -lc 'python3 -m pip install --no-cache-dir --disable-pip-version-check ${pkgs} && touch ${PIP_MARKER}'`;
-    return await runInstallProcess(sb, cmd, "pip install");
+    // 1) install to an explicit --target so we know exactly where the
+    //    packages land (the prelude adds this dir to sys.path)
+    // 2) self-verify by importing one of the headline modules; only mark
+    //    success after the import works, otherwise the marker would lie
+    //    and we'd get "ModuleNotFoundError" on the next run with no log
+    const cmd =
+      `mkdir -p ${PIP_TARGET} && ` +
+      `python3 -m pip install --no-cache-dir --disable-pip-version-check ` +
+      `--target ${PIP_TARGET} --upgrade ${pkgs} && ` +
+      `PYTHONPATH=${PIP_TARGET} python3 -c 'import google.oauth2.credentials, googleapiclient.discovery, httpx; print("self-check OK")' && ` +
+      `touch ${PIP_MARKER}`;
+    return await runInstallProcess(sb, `bash -lc ${shellQuote(cmd)}`, "pip install");
   }
 
   if (language === "typescript") {
@@ -354,6 +371,11 @@ async function runInstallProcess(
 function truncate(s: string, n: number): string {
   if (!s) return "";
   return s.length <= n ? s : s.slice(-n);
+}
+
+// Quote a string for safe use inside `bash -lc <quoted>`.
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 function parseLastJson(s: string): { status?: string; result?: unknown; error?: string } | null {

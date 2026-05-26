@@ -204,8 +204,9 @@ def _short(s) -> str:
 def _error_diag(raw: dict | None) -> str:
     """Build a multi-line diagnostic the user can actually read.
 
-    Picks the most informative line first — exit message, stderr tail, stdout
-    tail — and caps at ~600 chars so the chat bubble stays readable.
+    Picks the most informative content — exit message, install log, stderr
+    tail, stdout tail — and caps at ~1200 chars so the chat bubble stays
+    readable but still includes enough to act on.
     """
     if not raw:
         return "(no diagnostic captured)"
@@ -214,14 +215,22 @@ def _error_diag(raw: dict | None) -> str:
     stderr = (raw.get("stderr") or "").strip()
     stdout = (raw.get("stdout") or "").strip()
 
-    if err and err not in stderr:
-        parts.append(err)
-    if stderr:
-        parts.append(stderr.splitlines()[-1] if len(stderr.splitlines()) > 6 else stderr)
-    elif stdout:
-        parts.append(stdout.splitlines()[-1])
+    # If the sandbox prepended a labeled install log, that's the most
+    # actionable signal — keep it visible regardless of stderr length.
+    if "--- install log ---" in stderr:
+        parts.append(stderr)
+    else:
+        if err and err not in stderr:
+            parts.append(err)
+        if stderr:
+            # Last 6 lines of stderr keeps the traceback footer (file/line +
+            # exception type) without dragging in unrelated noise.
+            lines = stderr.splitlines()
+            parts.append("\n".join(lines[-6:]) if len(lines) > 6 else stderr)
+        elif stdout:
+            parts.append(stdout.splitlines()[-1])
 
     text = "\n".join(parts).strip() or "(empty error)"
-    if len(text) > 600:
-        text = text[:600] + "…"
+    if len(text) > 1200:
+        text = text[-1200:]
     return text
