@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException
 
 from ..config import get_settings
-from ..jobs.consolidate import consolidate_for_user
+from ..jobs.consolidate import consolidate_all_users, consolidate_for_user
 
 router = APIRouter()
 
@@ -21,9 +21,20 @@ def _check(auth: str | None) -> None:
 
 
 @router.post("/consolidate")
-async def consolidate(authorization: str | None = Header(default=None)) -> dict:
+async def consolidate(
+    authorization: str | None = Header(default=None),
+    user_id: str | None = None,
+) -> dict:
+    """Nightly consolidation.
+
+    With no `user_id` query param, runs for every active user. Pass
+    `?user_id=<uuid>` to consolidate a single user (useful for manual
+    re-runs or testing).
+    """
     _check(authorization)
-    s = get_settings()
-    if not s.jai_user_id:
-        raise HTTPException(400, "JAI_USER_ID not set")
-    return await consolidate_for_user(s.jai_user_id)
+    if user_id:
+        return await consolidate_for_user(user_id)
+    # Multi-tenant default. Used to require `JAI_USER_ID` env which
+    # silently meant "JB only" — fixed so any user signing up gets
+    # their nightly summary.
+    return await consolidate_all_users()

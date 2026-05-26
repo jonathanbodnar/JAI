@@ -7,12 +7,17 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+import asyncio
+import structlog
+
 from ..auth import CurrentUserDep
 from ..audit import write as audit_write
 from ..db import supabase_admin
 from ..memory.mem0 import JaiMem0
 from ..memory.qdrant import JaiQdrant
+from ..skills.library_seed import seed_user_library
 
+log = structlog.get_logger()
 router = APIRouter()
 
 
@@ -91,6 +96,18 @@ async def complete(user: CurrentUserDep, body: OnboardIn | None = None) -> dict[
             )
     except Exception:
         pass  # qdrant optional
+
+    # Auto-install the library skill catalog so a brand-new user can
+    # immediately ask about email, calendar, drive, KPIs, etc. without
+    # having to discover the Settings → Library tab on day one.
+    # Fire-and-forget — embeddings take 5–10s and we don't want to
+    # block the onboarding redirect on it.
+    async def _seed():
+        try:
+            await seed_user_library(user_id=user.user_id)
+        except Exception as e:
+            log.warning("onboarding.library_seed_failed", error=str(e), user=user.user_id)
+    asyncio.create_task(_seed())
 
     await audit_write(
         user_id=user.user_id,

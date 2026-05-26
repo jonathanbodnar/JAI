@@ -1,6 +1,6 @@
 """Nightly consolidation.
 
-Runs once per day per user (currently only JAI_USER_ID — multi-tenant later).
+Runs once per day per user.
 
 Steps:
   1. Pull all messages from the last 24h for the user's primary conversation.
@@ -23,6 +23,7 @@ second summary message.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -168,6 +169,49 @@ async def consolidate_for_user(user_id: str) -> dict:
         "reflection_emitted": bool(reflection_note),
         "qdrant_pruned": pruned,
         "scheduled_ran": len(schedule_results),
+    }
+
+
+async def consolidate_all_users(*, max_concurrency: int = 4) -> dict:
+    """Run consolidation for every active user.
+
+    Iterates `public.users` (Supabase Auth users mirrored into our
+    `users` table on first sign-in). Failures for one user never abort
+    the whole batch — we collect per-user results and return a summary.
+    `max_concurrency` keeps the LLM call budget under control.
+    """
+    sb = supabase_admin()
+    try:
+        rows = sb.table("users").select("id").execute().data or []
+    except Exception as e:
+        log.error("consolidate.user_list_failed", error=str(e))
+        return {"ok": False, "error": str(e), "ran": 0}
+
+    user_ids = [r["id"] for r in rows if r.get("id")]
+    if not user_ids:
+        return {"ok": True, "ran": 0, "skipped": 0, "errored": 0, "results": []}
+
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+
+    async def _run_one(uid: str):
+        async with sem:
+            try:
+                return uid, await consolidate_for_user(uid)
+            except Exception as e:
+                log.exception("consolidate.user_failed", user=uid, error=str(e))
+                return uid, {"ok": False, "error": str(e)[:200]}
+
+    results = await asyncio.gather(*(_run_one(uid) for uid in user_ids))
+
+    ok = sum(1 for _, r in results if (r or {}).get("ok") is True)
+    skipped = sum(1 for _, r in results if (r or {}).get("ok") is None)
+    errored = len(results) - ok - skipped
+    return {
+        "ok": errored == 0,
+        "ran": ok,
+        "skipped": skipped,
+        "errored": errored,
+        "results": [{"user_id": uid, "result": r} for uid, r in results],
     }
 
 
