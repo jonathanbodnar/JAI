@@ -50,6 +50,23 @@ async def run_intent(
         )
         return SkillOutcome(final_text=hit.response, record_id=hit.record_id)
 
+    # 1.5. URL shortcut. A bare Google Sheets/Drive/Docs URL embeds
+    # poorly — the matcher's cosine similarity against the library
+    # skill descriptions usually misses (URL token soup vs. natural
+    # language description), and we fall through to the skill builder
+    # which regenerates something that already exists. Catch the
+    # common Google URL shapes here and route directly to the right
+    # library skill if the user has it.
+    url_hit = await _url_shortcut(user_id=user_id, intent=intent)
+    if url_hit:
+        log.info("skill.url_shortcut", id=url_hit["id"], title=url_hit.get("title"))
+        return await _execute(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            skill=url_hit,
+            inputs={"intent": intent},
+        )
+
     # 2. Match.
     matches = await matcher.match(user_id=user_id, intent=intent)
     if matches:
@@ -263,6 +280,50 @@ async def _execute(
             "first_run": first_run,
         },
     )
+
+
+# Map of (regex pattern, library_key) for fast URL → skill routing.
+# Order matters — Sheets is matched before generic Drive because a
+# Sheets URL is also technically a Drive URL.
+_URL_ROUTES: list[tuple[str, str]] = [
+    (r"docs\.google\.com/spreadsheets/d/", "sheets.read_rows"),
+    (r"docs\.google\.com/document/d/", "drive.read_doc"),
+    (r"docs\.google\.com/presentation/d/", "drive.read_doc"),
+    (r"drive\.google\.com/(file/d/|open\?id=|drive/folders/)", "drive.search_files"),
+]
+
+
+async def _url_shortcut(*, user_id: str, intent: str) -> dict | None:
+    """Direct-route well-known content URLs to their library skill.
+
+    Bypasses the embedding matcher, which struggles to embed a bare URL
+    close to a library skill description. Returns the active skill row
+    (same shape as matcher.match) or None if there's no URL hit or the
+    user doesn't have the corresponding library skill installed.
+    """
+    import re
+
+    library_key: str | None = None
+    for pattern, key in _URL_ROUTES:
+        if re.search(pattern, intent):
+            library_key = key
+            break
+    if not library_key:
+        return None
+
+    from ..db import supabase_admin
+    sb = supabase_admin()
+    res = (
+        sb.table("skills")
+        .select("id, title, description, language, source, required_credentials, required_tools, metadata")
+        .eq("user_id", user_id)
+        .eq("is_active", True)
+        .contains("metadata", {"library_key": library_key})
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    return rows[0] if rows else None
 
 
 def _credential_ask(missing: list[str], explanation: str | None = None) -> str:
