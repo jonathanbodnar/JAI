@@ -17,6 +17,7 @@ from .routes import (
     audit,
     chat,
     context_ingest,
+    data_sources,
     jobs,
     mcp_connections,
     notes,
@@ -82,6 +83,7 @@ app.include_router(status_routes.router, prefix="/status", tags=["status"])
 app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
 app.include_router(context_ingest.router, prefix="/context", tags=["context"])
 app.include_router(schedule.router, prefix="/schedule", tags=["schedule"])
+app.include_router(data_sources.router, prefix="/datasources", tags=["datasources"])
 
 
 @app.get("/health")

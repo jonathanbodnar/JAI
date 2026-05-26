@@ -83,7 +83,10 @@ async def run_intent(
         description=draft.description,
         language=draft.language,
         source=draft.source,
-        required_credentials=draft.need_credentials,  # likely empty here
+        # `uses_credentials` is the set of env vars the script actually
+        # reads (extracted from the source + declared by the LLM). This
+        # is what gates execution and gets injected into the sandbox.
+        required_credentials=draft.uses_credentials,
         required_tools=draft.required_tools,
     )
     return await _execute(
@@ -117,7 +120,8 @@ async def _execute(
     # Always inject platform credentials so skills can call JAI's own
     # Supabase and API without the user having to store them manually.
     platform_env = _platform_env(user_id)
-    merged_env = {**platform_env, **creds}  # user creds win on collision
+    sources_env = await _data_sources_env(user_id)
+    merged_env = {**platform_env, **sources_env, **creds}  # user creds win on collision
 
     sandbox = SandboxClient()
     try:
@@ -184,6 +188,55 @@ def _credential_ask(missing: list[str], explanation: str | None = None) -> str:
         f"To do that, I need a few things from you: {keys}. "
         "Reply with `key=value` (one per line), or set them in Settings → Credentials."
     )
+
+
+async def _data_sources_env(user_id: str) -> dict[str, str]:
+    """Build env vars for the user's connected external data sources.
+
+    Emits two kinds of vars:
+      - `SUPABASE_PROJECTS_JSON` — JSON list of {slug,label,url,key} for
+        every active Supabase source. Lets skills enumerate or pick by slug.
+      - `SUPABASE_{SLUG}_URL` / `SUPABASE_{SLUG}_KEY` — per-source pairs
+        for skills that want a direct lookup.
+    """
+    import json
+    from ..db import supabase_admin
+    from .credentials import decrypt
+
+    env: dict[str, str] = {}
+    try:
+        sb = supabase_admin()
+        rows = (
+            sb.table("data_sources")
+            .select("kind, slug, label, url, key_encrypted")
+            .eq("user_id", user_id)
+            .eq("kind", "supabase")
+            .eq("is_active", True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        log.warning("data_sources.fetch_failed", error=str(e))
+        return env
+
+    projects: list[dict] = []
+    for r in rows:
+        try:
+            key = decrypt(r["key_encrypted"].encode("ascii"))
+        except Exception as e:
+            log.warning("data_sources.decrypt_failed", slug=r.get("slug"), error=str(e))
+            continue
+        slug = (r["slug"] or "").upper()
+        url = r["url"]
+        projects.append({"slug": r["slug"], "label": r["label"], "url": url, "key": key})
+        # Convenient per-source env vars for skills that target one project.
+        env[f"SUPABASE_{slug}_URL"] = url
+        env[f"SUPABASE_{slug}_KEY"] = key
+
+    if projects:
+        env["SUPABASE_PROJECTS_JSON"] = json.dumps(projects)
+    return env
 
 
 def _platform_env(user_id: str) -> dict[str, str]:

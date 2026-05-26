@@ -58,7 +58,7 @@ const NPM_MARKER = "/workspace/.npm-installed";
 // existing containers get destroyed and recreated on next /run. Otherwise
 // the user's persistent container keeps running on the old config until
 // it idles out (~10 min).
-const CONTAINER_VERSION = "v3-basic-python";
+const CONTAINER_VERSION = "v4-exec-install";
 const VERSION_MARKER = "/workspace/.container-version";
 // Install Python packages to an explicit /workspace path instead of the
 // system site-packages. The Cloudflare base image runs as a non-root user
@@ -68,17 +68,17 @@ const VERSION_MARKER = "/workspace/.container-version";
 const PIP_TARGET = "/workspace/.pylibs";
 
 // Packages JAI skills routinely need. Installed once per container
-// instance (cached via marker file). Deliberately lean: anything heavy
-// (e.g. supabase-py with its postgrest+gotrue+httpx[http2] tree)
-// blows past the container's RAM budget during install. For Supabase
-// we hit the REST API via httpx instead — same auth, zero install.
+// instance (cached via marker file). Deliberately MINIMAL: every package
+// we add inflates install time + memory and risks busting the
+// "Process did not become ready within 30000ms" sandbox spawn budget.
+// - httpx                       → all REST API calls (Supabase, custom)
+// - google-api-python-client    → Gmail/Calendar/Drive (pulls google-auth + httplib2)
+// google-auth-oauthlib / dateutil intentionally omitted — refresh-token
+// flow only needs google.oauth2.credentials.Credentials which is in
+// google-auth (transitively from google-api-python-client).
 const PIP_PACKAGES = [
   "httpx",
   "google-api-python-client",
-  "google-auth",
-  "google-auth-oauthlib",
-  "google-auth-httplib2",
-  "python-dateutil",
 ];
 
 const NPM_PACKAGES = ["tsx", "typescript"];
@@ -222,13 +222,21 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
     // script's import traceback.
     install_log = await ensureDepsInstalled(sb, body.language);
 
-    const prelude = PRELUDE[body.language];
-    await sb.writeFile(target.path, prelude + body.source);
+    if (install_log) {
+      // Install failed (success path returns ""). Don't bother running the
+      // user script — it will just blow up with ModuleNotFoundError and
+      // confuse the diagnosis. Surface the install error directly.
+      stderr = "";
+      exit_code = -1;
+    } else {
+      const prelude = PRELUDE[body.language];
+      await sb.writeFile(target.path, prelude + body.source);
 
-    const result = await sb.exec(target.cmd, { timeout: body.timeout_ms ?? 300_000 });
-    stdout = result.stdout ?? "";
-    stderr = result.stderr ?? "";
-    exit_code = result.exitCode ?? (result.success ? 0 : 1);
+      const result = await sb.exec(target.cmd, { timeout: body.timeout_ms ?? 300_000 });
+      stdout = result.stdout ?? "";
+      stderr = result.stderr ?? "";
+      exit_code = result.exitCode ?? (result.success ? 0 : 1);
+    }
   } catch (e) {
     // sb.mkdir / sb.writeFile / sb.exec can throw if the container fails to
     // boot or the SDK can't reach it. Surface that as a structured error
@@ -261,10 +269,12 @@ async function runSkill(body: RunBody, env: Env): Promise<Response> {
 // a (possibly empty) log string when an install actually ran or failed
 // so callers can include it in user-facing diagnostics.
 //
-// Uses startProcess() + waitForExit() instead of exec() so the
-// Worker → DO HTTP call doesn't get killed by Cloudflare's ~30s
-// subrequest limit on a long-running pip/npm install. waitForExit
-// polls the DO and survives transient network blips.
+// Uses `sb.exec` with a generous timeout. We previously used
+// startProcess+waitForExit to dodge Cloudflare's subrequest budget, but
+// that path hits a hardcoded 30s "process must become ready" timeout in
+// the sandbox SDK and was failing 100% of the time on cold containers.
+// Workers Paid gives us multi-minute subrequest wall-clock, which is
+// plenty for installing 2 packages.
 async function ensureDepsInstalled(
   sb: ReturnType<typeof getSandbox>,
   language: keyof typeof FILE_BY_LANG,
@@ -274,18 +284,18 @@ async function ensureDepsInstalled(
     if (hit) return "";
 
     const pkgs = PIP_PACKAGES.join(" ");
-    // 1) install to an explicit --target so we know exactly where the
-    //    packages land (the prelude adds this dir to sys.path)
-    // 2) self-verify by importing one of the headline modules; only mark
-    //    success after the import works, otherwise the marker would lie
-    //    and we'd get "ModuleNotFoundError" on the next run with no log
+    // 1) install to an explicit --target so the prelude knows exactly
+    //    where the packages land (Cloudflare's image runs as non-root
+    //    and the default site-packages isn't importable for us)
+    // 2) self-verify by importing the headline modules; only stamp the
+    //    marker after success so a failed install doesn't fake-cache
     const cmd =
       `mkdir -p ${PIP_TARGET} && ` +
       `python3 -m pip install --no-cache-dir --disable-pip-version-check ` +
-      `--target ${PIP_TARGET} --upgrade ${pkgs} && ` +
+      `--target ${PIP_TARGET} --upgrade ${pkgs} 2>&1 && ` +
       `PYTHONPATH=${PIP_TARGET} python3 -c 'import httpx, google.oauth2.credentials, googleapiclient.discovery; print("self-check OK")' && ` +
       `touch ${PIP_MARKER}`;
-    return await runInstallProcess(sb, `bash -lc ${shellQuote(cmd)}`, "pip install");
+    return await runExecInstall(sb, `bash -lc ${shellQuote(cmd)}`, "pip install");
   }
 
   if (language === "typescript") {
@@ -294,7 +304,7 @@ async function ensureDepsInstalled(
 
     const pkgs = NPM_PACKAGES.join(" ");
     const cmd = `bash -lc 'npm install -g ${pkgs} && touch ${NPM_MARKER}'`;
-    return await runInstallProcess(sb, cmd, "npm install");
+    return await runExecInstall(sb, cmd, "npm install");
   }
 
   return "";
@@ -309,7 +319,7 @@ async function containerIsStale(
 ): Promise<boolean> {
   try {
     const res = await sb.exec(`cat ${VERSION_MARKER} 2>/dev/null || true`, {
-      timeout: 5_000,
+      timeout: 15_000,
     });
     const stamped = (res.stdout ?? "").trim();
     // If the file is missing/empty, we don't know what version it is —
@@ -335,13 +345,14 @@ async function containerLacksRuntime(
         ? "command -v node"
         : "command -v bash";
   try {
-    const res = await sb.exec(probe, { timeout: 8_000 });
+    // Cold containers can take 10-20s to respond to their first exec.
+    // We don't want a slow boot to be mistaken for "no runtime" — that
+    // triggers a destroy+recreate loop that never makes progress.
+    const res = await sb.exec(probe, { timeout: 30_000 });
     const found = (res.stdout ?? "").trim();
-    // If `command -v` printed a path, the runtime exists. Anything else
-    // (empty output, non-zero exit) means it's missing.
     return !found;
   } catch {
-    // Container unreachable — treat as stale so we rebuild.
+    // Container probably unreachable — treat as stale so we rebuild.
     return true;
   }
 }
@@ -352,7 +363,7 @@ async function markerExists(
 ): Promise<boolean> {
   try {
     const res = await sb.exec(`test -f ${marker} && echo HIT || echo MISS`, {
-      timeout: 8_000,
+      timeout: 15_000,
     });
     return (res.stdout ?? "").trim() === "HIT";
   } catch {
@@ -362,47 +373,24 @@ async function markerExists(
   }
 }
 
-async function runInstallProcess(
+async function runExecInstall(
   sb: ReturnType<typeof getSandbox>,
   cmd: string,
   label: string,
 ): Promise<string> {
-  let proc;
   try {
-    proc = await sb.startProcess(cmd);
+    const res = await sb.exec(cmd, { timeout: 240_000 }); // 4 min ceiling
+    const exit = res.exitCode ?? (res.success ? 0 : 1);
+    if (exit === 0) return "";
+    const blob =
+      `${label} FAILED (exit ${exit}):\n` +
+      truncate((res.stdout ?? "") + "\n" + (res.stderr ?? ""), 4000);
+    return blob;
   } catch (e) {
-    return `${label} could not start: ${(e as Error)?.message || String(e)}`;
+    // Most common path: container hadn't finished booting yet, or
+    // pip download stalled. Surface the raw error so we can see it.
+    return `${label} could not run: ${(e as Error)?.message || String(e)}`;
   }
-
-  let exitResult;
-  try {
-    exitResult = await proc.waitForExit(300_000); // 5 min ceiling
-  } catch (e) {
-    // Connection blip — try once more by polling getStatus()
-    const msg = (e as Error)?.message || String(e);
-    try {
-      const status = await proc.getStatus();
-      const logs = await proc.getLogs();
-      return `${label} wait failed (${msg}); last status: ${status}\n${truncate(
-        (logs.stdout ?? "") + (logs.stderr ?? ""),
-        4000,
-      )}`;
-    } catch {
-      return `${label} wait failed and status unrecoverable: ${msg}`;
-    }
-  }
-
-  const ok = exitResult.exitCode === 0;
-  if (ok) return "";
-
-  let logs = { stdout: "", stderr: "" };
-  try {
-    logs = await proc.getLogs();
-  } catch {
-    /* ignore */
-  }
-  const tail = truncate((logs.stdout ?? "") + (logs.stderr ?? ""), 4000);
-  return `${label} FAILED (exit ${exitResult.exitCode ?? "?"}):\n${tail}`;
 }
 
 function truncate(s: string, n: number): string {
