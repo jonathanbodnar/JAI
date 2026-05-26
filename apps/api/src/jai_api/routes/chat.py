@@ -36,6 +36,36 @@ def _ws_user(token: str | None = Query(default=None)) -> CurrentUser:
     return get_current_user(authorization=f"Bearer {token}" if token else None)
 
 
+@router.get("/recent")
+async def recent_messages(user: CurrentUserDep, limit: int = 100) -> dict:
+    """Return the most recent messages from the user's primary conversation.
+
+    Used by the web client to recover a mid-turn response that was persisted
+    on the server while the WebSocket was disconnected (e.g. the user
+    navigated away from /chat while the LLM was still drafting).
+    """
+    try:
+        sb = supabase_admin()
+    except Exception as e:
+        log.warning("supabase.unavailable", error=str(e))
+        return {"messages": []}
+    try:
+        conv_id = await _primary_conversation_id(sb, user.user_id)
+        res = (
+            sb.table("messages")
+            .select("id,role,content,metadata,created_at")
+            .eq("conversation_id", conv_id)
+            .order("created_at", desc=True)
+            .limit(max(1, min(limit, 500)))
+            .execute()
+        )
+        rows = list(reversed(res.data or []))
+        return {"messages": rows}
+    except Exception as e:
+        log.warning("chat.recent.failed", error=str(e))
+        return {"messages": []}
+
+
 @router.post("/reset")
 async def reset_conversation(request: Request, user: CurrentUserDep) -> dict:
     """Wipe the LangGraph checkpoint for this user.
@@ -70,6 +100,16 @@ async def reset_conversation(request: Request, user: CurrentUserDep) -> dict:
     except Exception as e:
         log.warning("chat.reset.failed", error=str(e))
         return {"ok": False, "cleared": deleted, "error": str(e)}
+
+    # Also wipe the persisted message log so recovery doesn't resurrect the
+    # cleared conversation on the next page load.
+    try:
+        sb = supabase_admin()
+        conv_id = await _primary_conversation_id(sb, user.user_id)
+        sb.table("messages").delete().eq("conversation_id", conv_id).execute()
+    except Exception as e:
+        log.warning("chat.reset.messages_delete_failed", error=str(e))
+
     log.info("chat.reset.done", user=user.user_id[:8], deleted=deleted)
     return {"ok": True, "cleared": deleted}
 
@@ -307,6 +347,7 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
                         "detail": extra or detail,
                     })
                 except Exception:
+                    # Client may have disconnected — don't abort the turn.
                     pass
                 if isinstance(delta, dict):
                     accumulated.update(delta)
@@ -314,17 +355,19 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
         role_used = accumulated.get("role_used")
     except Exception as e:
         log.exception("graph.invoke.failed", error=str(e))
-        await ws.send_json({"type": "error", "message": f"graph failed: {e}"})
-        return
+        try:
+            await ws.send_json({"type": "error", "message": f"graph failed: {e}"})
+        except Exception:
+            pass
+        # Persist the error so the user sees it on reload instead of a blank
+        # response (they may have switched away during streaming).
+        if sb and final_text == "":
+            final_text = f"Something went wrong: {str(e)[:200]}"
+        if not final_text:
+            return
 
-    # Send the user-visible text IMMEDIATELY — no waiting on DB or TTS.
-    await ws.send_json({
-        "type": "assistant_final",
-        "text": final_text,
-        "role_used": role_used,
-    })
-
-    # Persist assistant turn in the background.
+    # Persist the assistant turn FIRST — before sending — so a mid-turn
+    # disconnect can't lose the response. The user reloads and sees it.
     if sb:
         async def _insert_assistant():
             try:
@@ -340,6 +383,18 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
             except Exception as e:
                 log.warning("messages.assistant.insert_failed", error=str(e))
         asyncio.create_task(_insert_assistant())
+
+    # Send the user-visible text. If the WS is dead, persistence above
+    # already captured the response so the next reload renders it.
+    try:
+        await ws.send_json({
+            "type": "assistant_final",
+            "text": final_text,
+            "role_used": role_used,
+        })
+    except Exception:
+        log.info("chat.assistant_final.ws_closed", conv=conv_id)
+        return
 
     # Stream TTS audio back (best-effort). Wrap in try/except so a failed
     # Kokoro server never breaks the chat.

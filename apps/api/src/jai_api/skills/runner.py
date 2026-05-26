@@ -153,13 +153,21 @@ async def _execute(
         result_preview = _preview(raw.get("result"))
         text = f"Done{suffix}. {result_preview}" if result_preview else f"Done{suffix}."
     else:
+        # Keep enough of the error in the user-facing message that they can
+        # actually act on it (token expired → reconnect, 403 → grant scope,
+        # etc.) without digging into Supabase.
+        diag = _error_diag(raw)
         text = (
-            "That didn't work — the script errored out. "
-            f"({_short(raw.get('stderr')) or 'no stderr'}). "
-            "Want me to try a different approach?"
+            "That didn't work — the script errored out.\n\n"
+            f"```\n{diag}\n```\n"
+            "Want me to try a different approach, or reconnect the account in Settings?"
         )
 
-    return SkillOutcome(final_text=text, skill_id=skill["id"], raw=raw)
+    return SkillOutcome(
+        final_text=text,
+        skill_id=skill["id"],
+        raw={**(raw or {}), "skill_name": skill.get("title")},
+    )
 
 
 def _credential_ask(missing: list[str], explanation: str | None = None) -> str:
@@ -191,3 +199,29 @@ def _short(s) -> str:
         return ""
     s = str(s).strip().splitlines()[-1]
     return s[:160]
+
+
+def _error_diag(raw: dict | None) -> str:
+    """Build a multi-line diagnostic the user can actually read.
+
+    Picks the most informative line first — exit message, stderr tail, stdout
+    tail — and caps at ~600 chars so the chat bubble stays readable.
+    """
+    if not raw:
+        return "(no diagnostic captured)"
+    parts: list[str] = []
+    err = (raw.get("error") or "").strip()
+    stderr = (raw.get("stderr") or "").strip()
+    stdout = (raw.get("stdout") or "").strip()
+
+    if err and err not in stderr:
+        parts.append(err)
+    if stderr:
+        parts.append(stderr.splitlines()[-1] if len(stderr.splitlines()) > 6 else stderr)
+    elif stdout:
+        parts.append(stdout.splitlines()[-1])
+
+    text = "\n".join(parts).strip() or "(empty error)"
+    if len(text) > 600:
+        text = text[:600] + "…"
+    return text

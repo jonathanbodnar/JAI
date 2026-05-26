@@ -14,7 +14,7 @@ async def match(
     *,
     user_id: str,
     intent: str,
-    threshold: float = 0.82,
+    threshold: float = 0.72,
     limit: int = 3,
 ) -> list[dict]:
     """Return ordered matches with cosine `similarity` field."""

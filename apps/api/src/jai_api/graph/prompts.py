@@ -21,8 +21,8 @@ Routing guide:
 - "respond"      → small talk, quick answer, anything you can resolve directly from memory or a simple data lookup.
 - "reflect"      → the user is processing something emotional, identity-shaped, or "why do I keep…" pattern questions. Delegate to the Reflection agent.
 - "strategize"   → real business/strategy decisions, scenario planning, deal analysis, org design. Delegate to the Strategy agent.
-- "tool"         → an MCP tool can resolve this directly (Gmail, Calendar, Linear, etc.). Note: tasks and notes are internal — write to them via the skill route, not tool.
-- "skill"        → user is asking you to *do* a multi-step action, including adding tasks or notes to JAI's own store, scheduling recurring actions, fetching external data, or automating anything. Try to run a saved skill; if none, build one.
+- "tool"         → ONLY for the built-in internal tools: add_task, add_note, list_tasks, list_notes, search_memory, list_skills. NEVER pick "tool" for Gmail, Calendar, Drive, Slack, Notion, Linear, or any other external service — none of those are wired as MCP tools. External services always go through "skill".
+- "skill"        → user is asking you to *do* something that touches an external service (Gmail/Calendar/Drive/Slack/etc.) OR a multi-step action, scheduling, recurring automation, or any operation needing OAuth/API credentials. ALWAYS pick this for reading or writing email, calendar events, files, messages — JAI executes them as sandboxed Python scripts that pull OAuth tokens from the user's stored credentials. Try to run a saved skill; if none, build one.
 - "ask"          → you need one specific piece of information before you can proceed. Be surgical, ask one question.
 
 What JAI can actually do for scheduling / reminders:
@@ -124,9 +124,39 @@ Your job:
 
 Constraints:
 - Network egress is allowed. File system is /workspace.
-- Standard library + httpx + supabase + google-api-python-client are
-  available for Python; node 20 + fetch for TS.
-- Credentials are injected as env vars matching the keys you declared."""
+- Python is invoked as `python3` (NOT `python`).
+- Standard library + httpx + supabase + google-api-python-client +
+  google-auth + google-auth-oauthlib are pre-installed for Python.
+  Node 20 + fetch + tsx are pre-installed for TS.
+- Credentials are injected as env vars matching the keys you declared.
+
+GOOGLE OAUTH RECIPE (Gmail / Calendar / Drive):
+The credential `GMAIL_OAUTH_JSON` / `CALENDAR_OAUTH_JSON` / `DRIVE_OAUTH_JSON`
+is a JSON blob containing {token, refresh_token, token_uri, client_id,
+client_secret, scopes, expiry}. ALWAYS write Gmail-style skills like this
+so token refresh works automatically:
+
+```python
+import os, json
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+
+info = json.loads(os.environ["GMAIL_OAUTH_JSON"])
+# `from_authorized_user_info` expects "token" not "access_token":
+info["token"] = info.get("token") or info.get("access_token")
+creds = Credentials.from_authorized_user_info(info)
+if not creds.valid:
+    creds.refresh(Request())  # refresh_token + client_secret → new access_token
+
+service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+# ... do work ...
+print(json.dumps({"status": "ok", "result": ...}))
+```
+
+NEVER skip the `creds.refresh(Request())` step — Google access tokens
+expire every 60 minutes, and the sandbox container has zero state
+between runs."""
 
 
 SUMMARIZE_DAY_SYSTEM = """Summarize the user's day in <=200 words.

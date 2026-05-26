@@ -38,6 +38,14 @@ function saveMessages(msgs: Message[]) {
   }
 }
 
+type ServerMessageRow = {
+  id: string;
+  role: string;
+  content: string;
+  metadata?: { role_used?: string } | null;
+  created_at: string;
+};
+
 export function ChatView() {
   const [messages, setMessages] = useState<Message[]>(() => loadMessages());
   const [connected, setConnected] = useState(false);
@@ -57,6 +65,21 @@ export function ChatView() {
     liveStepsRef.current = liveSteps;
   }, [liveSteps]);
 
+  // Pulls recent messages from the server and merges any that the local
+  // client missed (e.g. an assistant_final the server persisted while we
+  // were on another tab / page).
+  const recoverFromServer = async () => {
+    try {
+      const { messages: rows } = (await api("/chat/recent?limit=100")) as {
+        messages: ServerMessageRow[];
+      };
+      if (!Array.isArray(rows) || rows.length === 0) return;
+      setMessages((prev) => mergeServerMessages(prev, rows));
+    } catch {
+      // Network or auth blip — ignore; localStorage still has the user's view.
+    }
+  };
+
   // Sidebar's "New chat" pill dispatches this event to wipe the current thread.
   useEffect(() => {
     const onNew = () => {
@@ -68,8 +91,19 @@ export function ChatView() {
   }, []);
 
   useEffect(() => {
+    // Pull whatever the server has on first mount so a response that
+    // landed while the tab was closed shows up immediately.
+    void recoverFromServer();
     const sock = new ChatSocket({
-      onOpen: () => setConnected(true),
+      onOpen: () => {
+        setConnected(true);
+        // Anything that arrived while the socket was down — recover it.
+        void recoverFromServer();
+        // If we re-opened with a still-spinning "thinking" indicator,
+        // the server-side turn has either finished (recoverFromServer
+        // appended the assistant) or failed silently. Clear the spinner.
+        setThinking(false);
+      },
       onClose: () => setConnected(false),
       onMessage: (m: ServerMsg) => {
         switch (m.type) {
@@ -272,4 +306,32 @@ export function ChatView() {
 function cryptoId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return Math.random().toString(36).slice(2);
+}
+
+function normalizeContent(s: string): string {
+  return (s || "").trim();
+}
+
+// Merge server-fetched messages with the local list. Local messages are
+// authoritative for ordering and step traces; server messages fill any gap
+// (typically the last assistant_final that the client missed because the
+// WebSocket dropped before the frame arrived).
+function mergeServerMessages(local: Message[], rows: ServerMessageRow[]): Message[] {
+  const localKeys = new Set(
+    local.map((m) => `${m.role}|${normalizeContent(m.text)}`),
+  );
+  const merged: Message[] = [...local];
+  for (const row of rows) {
+    if (row.role !== "user" && row.role !== "assistant") continue;
+    const key = `${row.role}|${normalizeContent(row.content)}`;
+    if (localKeys.has(key)) continue;
+    merged.push({
+      id: row.id,
+      role: row.role as "user" | "assistant",
+      text: row.content,
+      agent: row.metadata?.role_used,
+    });
+    localKeys.add(key);
+  }
+  return merged;
 }

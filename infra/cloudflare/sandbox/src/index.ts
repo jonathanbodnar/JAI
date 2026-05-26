@@ -43,7 +43,10 @@ type RunBody = {
 };
 
 const FILE_BY_LANG = {
-  python: { path: "/workspace/skill.py", cmd: "python /workspace/skill.py" },
+  // Cloudflare's official sandbox image ships `python3` only — there is no
+  // bare `python` symlink. Invoking the wrong binary fails with
+  // "python: command not found" before the script even gets a chance to run.
+  python: { path: "/workspace/skill.py", cmd: "python3 /workspace/skill.py" },
   typescript: { path: "/workspace/skill.ts", cmd: "tsx /workspace/skill.ts" },
   bash: { path: "/workspace/skill.sh", cmd: "bash /workspace/skill.sh" },
 } as const;
