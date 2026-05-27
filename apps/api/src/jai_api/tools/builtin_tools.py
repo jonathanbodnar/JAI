@@ -10,6 +10,7 @@ import structlog
 from langchain_core.tools import tool
 
 from ..db import supabase_admin
+from . import supabase_inproc
 
 log = structlog.get_logger()
 
@@ -107,4 +108,84 @@ def builtin_tools_for(user_id: str) -> list:
         )
         return res.data or []
 
-    return [add_note, add_task, list_tasks, list_notes, search_memory, list_skills]
+    # --- Connected Supabase projects (in-process MCP-style) -----------
+    # These tools let the ReAct agent query the user's OTHER Supabase
+    # projects (Shoutout, etc.) directly in the FastAPI process. No
+    # codegen, no sandbox boot — ~500ms per call vs ~15s for the old
+    # skill path. Same pattern Cursor/Claude Desktop use over MCP.
+
+    @tool
+    async def db_list_projects() -> list[dict[str, Any]]:
+        """List the user's connected Supabase projects (slugs and labels).
+
+        Use this FIRST when the user asks about data in a project by name
+        ("shoutout", "production db", etc.) — the returned `slug` is what
+        you pass to the other db_* tools.
+        """
+        return await supabase_inproc.list_projects(user_id)
+
+    @tool
+    async def db_describe_schema(project_slug: str) -> dict[str, Any]:
+        """Describe the table+column structure of a connected Supabase project.
+
+        Returns {project, tables: {table_name: [{name, type}, ...]}}.
+        Use this BEFORE writing queries against an unfamiliar project so
+        you pick real table and column names. Cached for 10 min in-process.
+        """
+        return await supabase_inproc.describe_schema(user_id, project_slug)
+
+    @tool
+    async def db_query_table(
+        project_slug: str,
+        table: str,
+        select: str = "*",
+        filters: dict[str, str] | None = None,
+        order: str | None = None,
+        limit: int = 50,
+        exact_count: bool = False,
+    ) -> dict[str, Any]:
+        """Query a single table in a connected Supabase project (PostgREST).
+
+        Args:
+          project_slug: project slug from db_list_projects (e.g. "shoutout").
+          table: table name.
+          select: PostgREST select string. Supports aggregations:
+            "count" — total count
+            "amount.sum()" — sum of amount column
+            "status, count()" — group-by-like (returns one row per status)
+          filters: column -> PostgREST operator value, e.g.:
+            {"created_at": "gte.2026-04-01"} — created_at >= '2026-04-01'
+            {"created_at": "lt.2026-05-01"} — created_at <  '2026-05-01'
+            {"status": "eq.completed"} — status = 'completed'
+            {"type": "neq.wallet_credit"} — type != 'wallet_credit'
+            {"amount": "gt.0"} — amount > 0
+          order: "column.asc" or "column.desc".
+          limit: max rows (cap 1000).
+          exact_count: if True, also returns total matching count.
+
+        Returns: {rows: [...], count: int | None, error: str | None}.
+        Each row is a dict keyed by column name. For aggregations the
+        rows array has a single dict with the aggregate values.
+        """
+        return await supabase_inproc.query_table(
+            user_id=user_id,
+            slug=project_slug,
+            table=table,
+            select=select,
+            filters=filters,
+            order=order,
+            limit=limit,
+            exact_count=exact_count,
+        )
+
+    return [
+        add_note,
+        add_task,
+        list_tasks,
+        list_notes,
+        search_memory,
+        list_skills,
+        db_list_projects,
+        db_describe_schema,
+        db_query_table,
+    ]
