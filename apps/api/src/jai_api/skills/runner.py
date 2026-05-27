@@ -67,6 +67,22 @@ async def run_intent(
             inputs={"intent": intent},
         )
 
+    # 1.6. Intent shortcut. Common verbs ("draft an email", "what's
+    # on my calendar", "search my drive", "track <kpi> = N") map
+    # deterministically to library skills. Matters because the
+    # embedding matcher misses these often enough that the skill
+    # builder gets called for skills we already have, ballooning the
+    # library with duplicates (see JB's 12+ "Read Recent Emails" rows).
+    intent_hit = await _intent_shortcut(user_id=user_id, intent=intent)
+    if intent_hit:
+        log.info("skill.intent_shortcut", id=intent_hit["id"], title=intent_hit.get("title"))
+        return await _execute(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            skill=intent_hit,
+            inputs={"intent": intent},
+        )
+
     # 2. Match.
     matches = await matcher.match(user_id=user_id, intent=intent)
     if matches:
@@ -293,6 +309,81 @@ _URL_ROUTES: list[tuple[str, str]] = [
 ]
 
 
+# Intent → library_key map. Each pattern is a regex matched
+# case-insensitively against the full user message. We match the
+# verbs/phrases that the orchestrator's own prompt lists as concrete
+# skill triggers, so server-side routing mirrors what we're already
+# telling the LLM to do.
+#
+# Order matters — more specific patterns first. "send the draft"
+# should beat "send email" (the former is gmail.send_draft, the
+# latter is gmail.compose if no draft exists yet).
+_INTENT_ROUTES: list[tuple[str, str]] = [
+    # --- Email: refine / send / draft (compose) ---
+    (r"\b(send|fire off|ship) (the|that|this|my)? ?(draft|email|reply)\b", "gmail.send_draft"),
+    # Refinement triggers — require an explicit draft/email noun so
+    # "make it shorter" doesn't false-match unrelated content. Bare
+    # follow-ups still flow through the orchestrator's recent-skill
+    # hint into respond (which can re-derive from cache).
+    (r"\b(more casual|more formal|shorter|longer|tighten|rewrite|edit|fix)\s+(the\s+)?(draft|opener|email|subject|reply)\b", "gmail.refine_draft"),
+    (r"\bmake (it|the (email|draft)) (shorter|longer|more casual|more formal)\b", "gmail.refine_draft"),
+    # Compose triggers — allow flexible filler between the verb and the
+    # noun ("draft an email", "write me a quick email", "compose a
+    # reply", "put together a short note", etc.).
+    (r"\b(draft|write|compose|prep|prepare|put together)\b[^\n]{0,25}?\b(email|reply|message|note|response|dm)\b", "gmail.compose"),
+    (r"\breply to\b.*\b(email|thread|message)\b", "gmail.compose"),
+    (r"\breply to\b\s+\S+@\S+\.\S+", "gmail.compose"),
+    # --- Email: reading ---
+    (r"\b(any |what'?s |show me |list )?(important|priority) (emails|inbox|mail)\b", "gmail.important_inbox"),
+    (r"\b(read|check|show|list|see) (my )?(latest |recent |today'?s |new )?(emails|inbox|mail|gmail)\b", "gmail.read_inbox"),
+    (r"\bwhat'?s in my (inbox|gmail|mail)\b", "gmail.read_inbox"),
+    (r"\b(any )?(new )?unread (emails?|mails?)\b", "gmail.unread_count"),
+    (r"\bsearch (my )?(emails?|gmail|inbox)\b", "gmail.search"),
+    (r"\barchive (my )?(emails?|messages?|gmail)\b", "gmail.archive"),
+    # --- Calendar ---
+    (r"\b(find|any) free (time|slots?)\b", "calendar.find_free_time"),
+    (r"\b(create|add|schedule|book|put on) (an? |the )?(event|meeting|calendar (event|invite)|invite)\b", "calendar.create_event"),
+    (r"\bweek('s)? (calendar|summary|meetings|hours)\b", "calendar.week_summary"),
+    (r"\b(what'?s |show |my )?(today'?s |my )?(calendar|agenda|schedule)\b", "calendar.agenda"),
+    # --- Drive ---
+    (r"\b(search|find) (my )?(drive|files|docs?)\b", "drive.search_files"),
+    (r"\b(read|open|show me) (this |the |that )?(doc|document|sheet|spreadsheet|slides?)\b", "drive.read_doc"),
+    (r"\b(recent|latest) (drive )?(files?|docs?)\b", "drive.recent_files"),
+    # --- KPIs ---
+    # Verb + label + "= value" within a single short phrase. The bounded
+    # gap (≤40 chars, no newline) avoids matching unrelated `=` later
+    # in a long message like "I set the alarm = wake at 7".
+    (r"\b(track|pin|set|update)\b[^\n]{0,40}=\s*\S+", "jai.kpi_upsert"),
+    (r"\b(what'?s|what are|show|list) (my |the )?KPIs?\b", "jai.kpi_list"),
+    # --- JAI internal ---
+    (r"\b(what'?s|what are|show|list) (my )?tasks?\b", "jai.list_tasks"),
+    (r"\b(add|create) (a )?task\b", "jai.create_task"),
+    (r"\bsearch (my )?notes\b", "jai.search_notes"),
+    (r"\brecent (jai )?(activity|history)\b", "jai.recent_activity"),
+]
+
+
+async def _library_skill_by_key(user_id: str, library_key: str) -> dict | None:
+    """Fetch a user's active library skill by its canonical key.
+
+    Returns None if the skill isn't installed (user opted out, or
+    seeder hasn't run yet for them) so the caller can fall through.
+    """
+    from ..db import supabase_admin
+    sb = supabase_admin()
+    res = (
+        sb.table("skills")
+        .select("id, title, description, language, source, required_credentials, required_tools, metadata")
+        .eq("user_id", user_id)
+        .eq("is_active", True)
+        .contains("metadata", {"library_key": library_key})
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
 async def _url_shortcut(*, user_id: str, intent: str) -> dict | None:
     """Direct-route well-known content URLs to their library skill.
 
@@ -311,19 +402,33 @@ async def _url_shortcut(*, user_id: str, intent: str) -> dict | None:
     if not library_key:
         return None
 
-    from ..db import supabase_admin
-    sb = supabase_admin()
-    res = (
-        sb.table("skills")
-        .select("id, title, description, language, source, required_credentials, required_tools, metadata")
-        .eq("user_id", user_id)
-        .eq("is_active", True)
-        .contains("metadata", {"library_key": library_key})
-        .limit(1)
-        .execute()
-    )
-    rows = res.data or []
-    return rows[0] if rows else None
+    return await _library_skill_by_key(user_id, library_key)
+
+
+async def _intent_shortcut(*, user_id: str, intent: str) -> dict | None:
+    """Direct-route common skill verbs to their library skill.
+
+    The embedding matcher routinely misses obvious phrasings — "draft
+    an email" vs. the gmail.compose description sits below the 0.65
+    cosine threshold often enough that the runner falls through to
+    skill_builder and regenerates a duplicate skill (or fails). The
+    orchestrator prompt already enumerates these mappings; this is
+    the server-side enforcement of the same contract.
+
+    Returns the active skill row or None if no pattern matches or the
+    user doesn't have that library skill installed.
+    """
+    import re
+
+    library_key: str | None = None
+    for pattern, key in _INTENT_ROUTES:
+        if re.search(pattern, intent, flags=re.IGNORECASE):
+            library_key = key
+            break
+    if not library_key:
+        return None
+
+    return await _library_skill_by_key(user_id, library_key)
 
 
 def _credential_ask(missing: list[str], explanation: str | None = None) -> str:
