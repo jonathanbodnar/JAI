@@ -56,6 +56,28 @@ async def set_active(*, user_id: str, skill_id: str, is_active: bool) -> None:
     ).execute()
 
 
+async def disable_skill(*, skill_id: str, reason: str) -> None:
+    """Hard-disable a skill the runner judged broken.
+
+    Sets is_active=false AND tags the metadata so the dedup matcher
+    (which can re-activate near-matches) treats this skill as a
+    no-touch graveyard entry rather than reviving it on the next run.
+    """
+    sb = supabase_admin()
+    cur = (
+        sb.table("skills")
+        .select("metadata")
+        .eq("id", skill_id)
+        .limit(1)
+        .execute()
+    )
+    meta = (cur.data[0].get("metadata") if cur.data else {}) or {}
+    meta = {**meta, "disabled_reason": reason[:300], "disabled_at": datetime.now(timezone.utc).isoformat()}
+    sb.table("skills").update({"is_active": False, "metadata": meta}).eq(
+        "id", skill_id
+    ).execute()
+
+
 async def get_skill(*, user_id: str, skill_id: str) -> dict | None:
     sb = supabase_admin()
     res = (

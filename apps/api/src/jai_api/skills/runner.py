@@ -139,6 +139,20 @@ async def run_intent(
         description=draft.description,
     )
     if twin:
+        # If the near-twin was disabled because it was broken (syntax
+        # error, runtime poison, etc.), DO NOT revive it — that's how
+        # the same SyntaxError ran four times in a row for JB. Just
+        # ignore it and let the rest of the flow save the fresh draft.
+        twin_meta = twin.get("metadata") or {}
+        if twin_meta.get("disabled_reason"):
+            log.info(
+                "skill.dedup.skip_disabled",
+                twin_id=twin["id"],
+                reason=str(twin_meta.get("disabled_reason"))[:120],
+            )
+            twin = None
+
+    if twin:
         log.info(
             "skill.dedup.hit",
             twin_id=twin["id"],
@@ -231,6 +245,35 @@ async def _execute(
         **intent_env,
         **creds,  # user creds win on collision
     }
+
+    # SYNTAX GUARD at execution time — covers skills already in the DB
+    # whose source is broken (LLM artifacts from before the builder-side
+    # syntax check, or skills that survived an archive/dedup cycle).
+    # If we don't gate this here, the matcher happily re-runs the same
+    # broken skill forever and the user pays the sandbox boot cost each
+    # time for the same SyntaxError. Also disable the skill so the next
+    # matcher round doesn't return it again.
+    bad = _python_syntax_error(skill.get("language") or "python", skill.get("source") or "")
+    if bad is not None:
+        log.warning(
+            "skill.execute.syntax_invalid",
+            skill_id=skill["id"],
+            title=skill.get("title"),
+            error=str(bad)[:200],
+        )
+        try:
+            await registry.disable_skill(skill_id=skill["id"], reason=f"syntax: {bad}")
+        except Exception as disable_err:
+            log.warning("skill.disable_failed", error=str(disable_err)[:200])
+        return SkillOutcome(
+            final_text=(
+                "That skill's source had a Python syntax error "
+                f"(`{bad}`), so I disabled it instead of running broken "
+                "code in the sandbox. Ask me again and I'll draft a "
+                "fresh version, or tell me what you want differently."
+            ),
+            skill_id=skill["id"],
+        )
 
     sandbox = SandboxClient()
     try:
@@ -670,6 +713,24 @@ def _short(s) -> str:
         return ""
     s = str(s).strip().splitlines()[-1]
     return s[:160]
+
+
+def _python_syntax_error(language: str, source: str) -> str | None:
+    """Return a short SyntaxError summary if `source` won't parse, else None.
+
+    Only validates Python (the dominant language). For TS/bash we trust
+    the sandbox to surface its own parse errors.
+    """
+    if (language or "").lower() != "python" or not source:
+        return None
+    import ast as _ast
+    try:
+        _ast.parse(source)
+        return None
+    except SyntaxError as e:
+        msg = e.msg or "syntax error"
+        loc = f" at line {e.lineno}" if getattr(e, "lineno", None) else ""
+        return f"{msg}{loc}"
 
 
 def _error_diag(raw: dict | None) -> str:
