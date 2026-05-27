@@ -78,20 +78,22 @@ export function ActivityRibbon() {
   return (
     <aside
       aria-label="Recent activity"
-      // Hidden below md (mobile uses the bottom nav + composer area).
+      // Only show on viewports wide enough that a 220px panel fits
+      // comfortably to the left of the centered max-w-3xl chat
+      // column without overlapping. Below xl (1280px) the chat column
+      // grows close to the left edge and any overlay would collide.
       // Absolute so it lives inside the chat panel — no sidebar-width
       // arithmetic, automatically gets the right inset regardless of
-      // sidebar expand/collapse state. Sits below the composer's
-      // bottom gradient (z-10) and above the message list.
-      className="hidden md:block absolute left-4 bottom-36 z-[6] w-[300px] pointer-events-none select-none"
+      // sidebar expand/collapse state.
+      className="hidden xl:block absolute left-3 bottom-28 z-[6] w-[220px] pointer-events-none select-none"
     >
-      <div className="text-[10px] uppercase tracking-[0.18em] font-semibold text-[#5a5d61] mb-2 pl-1">
+      <div className="text-[9px] uppercase tracking-[0.18em] font-semibold text-[#5a5d61] mb-1.5 pl-0.5">
         Recent
       </div>
 
       {/* Reverse so the freshest item lands at the bottom. We then fade
           upward via the per-row opacity gradient. */}
-      <ul className="flex flex-col gap-1.5">
+      <ul className="flex flex-col gap-1">
         {[...items].reverse().map((it, idxFromTop) => {
           const fromBottom = items.length - 1 - idxFromTop;
           const opacity = activityOpacity(fromBottom);
@@ -102,8 +104,8 @@ export function ActivityRibbon() {
               // rows just transition opacity to their new slot.
               key={it.id}
               className={cn(
-                "activity-row flex items-start gap-2 text-[12px] leading-snug pl-1 transition-opacity duration-300",
-                fromBottom === 0 && "text-zinc-100",
+                "activity-row flex items-center gap-1.5 text-[11px] leading-snug pl-0.5 transition-opacity duration-300",
+                fromBottom === 0 && "text-zinc-200",
                 fromBottom > 0 && "text-[#8e918f]",
               )}
               // CSS variable feeds the @keyframes "to" opacity so the
@@ -111,18 +113,13 @@ export function ActivityRibbon() {
               // alpha for that row's slot.
               style={{ opacity, ["--row-opacity" as string]: opacity }}
             >
-              <span className="shrink-0 mt-[2px]">
+              <span className="shrink-0">
                 <ItemIcon kind={it.kind} status={it.status} />
               </span>
-              <div className="flex-1 min-w-0">
-                <div className="truncate font-medium">{it.title}</div>
-                {it.detail && (
-                  <div className="truncate text-[11px] text-[#5a5d61]">
-                    {it.detail}
-                  </div>
-                )}
+              <div className="flex-1 min-w-0 truncate font-medium">
+                {it.title}
               </div>
-              <span className="shrink-0 text-[10px] text-[#5a5d61] tabular-nums pt-[2px]">
+              <span className="shrink-0 text-[9px] text-[#5a5d61] tabular-nums">
                 {relativeTime(it.at, now)}
               </span>
             </li>

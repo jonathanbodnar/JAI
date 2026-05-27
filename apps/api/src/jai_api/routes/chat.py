@@ -433,26 +433,62 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
     role_used: str | None = None
     canvas: dict | None = None
     try:
-        # Stream node-level updates so the client can render "thinking steps"
-        # like Cursor. We still need the final state, so we accumulate it.
+        # Stream BOTH node-level updates (for the Cursor-style "thinking
+        # steps" the client renders) AND per-token LLM output (so a slow
+        # respond turn shows progress instead of a 60-second silence).
+        # LangGraph multi-mode yields ("updates", payload) and ("messages",
+        # (chunk, metadata)) tuples — we dispatch on the mode tag.
         accumulated: dict = {}
-        async for update in graph.app.astream(state_input, config=config, stream_mode="updates"):
-            # update is {node_name: state_delta}
-            for node_name, delta in update.items():
-                label, detail = _STEP_LABELS.get(node_name, (node_name.replace("_", " ").title(), None))
-                extra = _summarize_delta(node_name, delta)
+        streamed_response = False
+        async for mode, payload in graph.app.astream(
+            state_input,
+            config=config,
+            stream_mode=["updates", "messages"],
+        ):
+            if mode == "updates":
+                # payload is {node_name: state_delta}
+                for node_name, delta in payload.items():
+                    label, detail = _STEP_LABELS.get(node_name, (node_name.replace("_", " ").title(), None))
+                    extra = _summarize_delta(node_name, delta)
+                    try:
+                        await ws.send_json({
+                            "type": "step",
+                            "node": node_name,
+                            "label": label,
+                            "detail": extra or detail,
+                        })
+                    except Exception:
+                        # Client may have disconnected — don't abort the turn.
+                        pass
+                    if isinstance(delta, dict):
+                        accumulated.update(delta)
+                continue
+
+            if mode == "messages":
+                # payload is (AIMessageChunk, metadata). We only forward
+                # tokens from the user-visible responder nodes — internal
+                # routing / structured-output LLMs (orchestrator,
+                # skill_builder) emit chunks too but the user shouldn't
+                # see those raw deliberations.
+                try:
+                    chunk, meta = payload
+                except (TypeError, ValueError):
+                    continue
+                node = (meta or {}).get("langgraph_node") if isinstance(meta, dict) else None
+                if node not in {"respond", "reflect", "strategize"}:
+                    continue
+                token = getattr(chunk, "content", None)
+                if not token or not isinstance(token, str):
+                    continue
+                streamed_response = True
                 try:
                     await ws.send_json({
-                        "type": "step",
-                        "node": node_name,
-                        "label": label,
-                        "detail": extra or detail,
+                        "type": "token",
+                        "node": node,
+                        "text": token,
                     })
                 except Exception:
-                    # Client may have disconnected — don't abort the turn.
                     pass
-                if isinstance(delta, dict):
-                    accumulated.update(delta)
         final_text = (accumulated.get("final_text") or "").strip() or "(no response)"
         role_used = accumulated.get("role_used")
         canvas = accumulated.get("canvas")

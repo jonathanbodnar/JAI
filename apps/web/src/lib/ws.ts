@@ -21,6 +21,11 @@ export type CanvasPayload = {
 export type ServerMsg =
   | { type: "user_transcript"; text: string }
   | { type: "assistant_delta"; text: string }
+  // Per-token chunk streamed from respond/reflect/strategize while the
+  // graph node is still running. The client appends these to a live
+  // assistant bubble so the user sees progress instead of a 30-second
+  // silence on slow Kimi calls.
+  | { type: "token"; node: string; text: string }
   | {
       type: "assistant_final";
       text: string;

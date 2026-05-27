@@ -11,7 +11,7 @@ from .orchestrator import _format_memory
 
 
 async def strategize(state: JaiState) -> dict:
-    llm = chat_for(Role.STRATEGY, temperature=0.4, streaming=False)
+    llm = chat_for(Role.STRATEGY, temperature=0.4, streaming=True)
     memory_block = _format_memory(state)
     sys = SystemMessage(content=STRATEGY_SYSTEM + "\n\n=== RETRIEVED MEMORY ===\n" + memory_block)
     window = (state.get("messages") or [])[-20:]

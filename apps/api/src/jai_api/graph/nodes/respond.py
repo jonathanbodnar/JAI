@@ -96,7 +96,11 @@ def _format_skill_context(state: JaiState) -> str:
 
 
 async def respond(state: JaiState) -> dict:
-    llm = chat_for(Role.RESPOND, temperature=0.5, streaming=False)
+    # streaming=True so the WebSocket layer can forward per-token chunks
+    # to the UI via stream_mode="messages". Without this, Kimi's full
+    # response has to complete before the user sees anything — that's
+    # 30–90s on a heavy turn and reads as "stuck".
+    llm = chat_for(Role.RESPOND, temperature=0.5, streaming=True)
     memory_block = _format_memory(state)
     skill_block = _format_skill_context(state)
 

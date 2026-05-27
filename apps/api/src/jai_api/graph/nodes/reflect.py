@@ -11,7 +11,7 @@ from .orchestrator import _format_memory
 
 
 async def reflect(state: JaiState) -> dict:
-    llm = chat_for(Role.REFLECTION, temperature=0.6, streaming=False)
+    llm = chat_for(Role.REFLECTION, temperature=0.6, streaming=True)
     memory_block = _format_memory(state)
     sys = SystemMessage(content=REFLECTION_SYSTEM + "\n\n=== RETRIEVED MEMORY ===\n" + memory_block)
     window = (state.get("messages") or [])[-20:]

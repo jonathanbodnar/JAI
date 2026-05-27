@@ -296,10 +296,59 @@ export function ChatView() {
               },
             ]);
             break;
+          case "token": {
+            // Append the chunk to the live streaming bubble, creating
+            // one on first token. We mark `streaming: true` so the
+            // bubble renders a blinking cursor and the copy hover
+            // stays hidden until assistant_final arrives.
+            const chunk = m.text || "";
+            if (!chunk) break;
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === "assistant" && last.streaming) {
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, text: last.text + chunk },
+                ];
+              }
+              return [
+                ...prev,
+                {
+                  id: cryptoId(),
+                  role: "assistant",
+                  text: chunk,
+                  agent: m.node,
+                  streaming: true,
+                  steps: liveStepsRef.current.length
+                    ? [...liveStepsRef.current]
+                    : undefined,
+                },
+              ];
+            });
+            break;
+          }
           case "assistant_final": {
             const newId = cryptoId();
             setMessages((prev) => {
               const steps = liveStepsRef.current;
+              const last = prev[prev.length - 1];
+              // If we were streaming tokens into a live bubble, replace
+              // that bubble with the authoritative final text rather
+              // than appending a duplicate.
+              if (last && last.role === "assistant" && last.streaming) {
+                return [
+                  ...prev.slice(0, -1),
+                  {
+                    ...last,
+                    id: newId,
+                    text: m.text,
+                    agent: m.role_used || last.agent,
+                    steps: steps.length ? steps : last.steps,
+                    canvas: m.canvas ?? null,
+                    streaming: false,
+                  },
+                ];
+              }
               return [
                 ...prev,
                 {

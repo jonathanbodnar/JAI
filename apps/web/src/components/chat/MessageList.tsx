@@ -23,6 +23,10 @@ export type Message = {
   agent?: string;
   steps?: Step[];
   canvas?: CanvasPayload | null;
+  // True while tokens are still streaming in from the LLM. The
+  // bubble shows a subtle cursor and suppresses the copy hover so
+  // the user knows the answer isn't final yet.
+  streaming?: boolean;
 };
 
 export function MessageList({
@@ -69,8 +73,18 @@ function Bubble({ m }: { m: Message }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Hover trigger goes on the OUTER group so the copy button (which
+  // starts at opacity-0) is still in the hover hit area. The previous
+  // version put hover on the same element that was hidden — you could
+  // never actually trigger it. `group` + `group-hover:opacity-100`
+  // fixes that for both user and assistant bubbles.
   return (
-    <div className={cn("flex flex-col", isUser ? "items-end" : "items-start")}>
+    <div
+      className={cn(
+        "group flex flex-col",
+        isUser ? "items-end" : "items-start",
+      )}
+    >
       <div className={cn("flex gap-3.5 w-full", isUser ? "flex-row-reverse" : "flex-row")}>
         {/* Avatar */}
         {!isUser && (
@@ -79,10 +93,10 @@ function Bubble({ m }: { m: Message }) {
           </div>
         )}
 
-        <div className={cn("flex-1 min-w-0", isUser ? "flex justify-end" : "")}>
+        <div className={cn("flex-1 min-w-0", isUser ? "flex flex-col items-end" : "")}>
           {/* Steps trace, collapsed by default, like Cursor */}
           {!isUser && m.steps && m.steps.length > 0 && (
-            <StepsTrace steps={m.steps} done={true} />
+            <StepsTrace steps={m.steps} done={!m.streaming} />
           )}
 
           {/* Main content body */}
@@ -101,7 +115,19 @@ function Bubble({ m }: { m: Message }) {
               </span>
             )}
 
-            {isUser ? m.text : <Markdown text={m.text} />}
+            {isUser ? (
+              m.text
+            ) : (
+              <>
+                <Markdown text={m.text} />
+                {m.streaming && (
+                  // Subtle pulsing cursor while tokens are still
+                  // streaming in. Disappears the moment assistant_final
+                  // arrives and `streaming` flips to false.
+                  <span className="inline-block w-[2px] h-4 align-middle ml-1 bg-[var(--accent)] animate-pulse" />
+                )}
+              </>
+            )}
           </div>
 
           {/* Canvas attachment card: clickable pill that opens the side panel */}
@@ -109,15 +135,27 @@ function Bubble({ m }: { m: Message }) {
             <CanvasCard canvas={m.canvas} messageId={m.id} />
           )}
 
-          {/* Action buttons (Copy, etc.) under the assistant message */}
-          {!isUser && (
-            <div className="flex items-center gap-1.5 mt-2.5 ml-1.5 md:ml-0 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity duration-200">
+          {/* Action buttons — appear on hover for BOTH user and
+              assistant bubbles. Suppressed while a message is still
+              streaming so the user doesn't copy a half-written reply. */}
+          {!m.streaming && (
+            <div
+              className={cn(
+                "flex items-center gap-1.5 mt-2 transition-opacity duration-150 opacity-0 group-hover:opacity-100 focus-within:opacity-100",
+                isUser ? "justify-end mr-1" : "ml-1.5 md:ml-0",
+              )}
+            >
               <button
                 onClick={copyToClipboard}
-                className="p-2 rounded-full hover:bg-[#1e1f20] text-[#8e918f] hover:text-white transition-colors border border-transparent hover:border-[#2d2f31]"
-                title="Copy response"
+                className="p-1.5 rounded-full hover:bg-[#1e1f20] text-[#8e918f] hover:text-white transition-colors border border-transparent hover:border-[#2d2f31]"
+                title={isUser ? "Copy your message" : "Copy response"}
+                aria-label={isUser ? "Copy your message" : "Copy response"}
               >
-                {copied ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                {copied ? (
+                  <Check size={13} className="text-emerald-400" />
+                ) : (
+                  <Copy size={13} />
+                )}
               </button>
             </div>
           )}
