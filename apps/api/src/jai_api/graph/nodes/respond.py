@@ -119,6 +119,34 @@ def _last_assistant_text(state: JaiState) -> str:
     return ""
 
 
+# Treat any ≤60-char user reply with no URL/email as a "tiny" follow-up.
+# These are answers to whatever the assistant just asked — and RAG
+# almost always pollutes them more than it helps. ("api only" matches
+# vector chunks about the apps/api codebase; "yes do it" matches
+# nothing useful; "saas" pulls in random SaaS tangents.)
+_TINY_REPLY_MAX_CHARS = 60
+
+
+def _is_tiny_continuation(prev_assistant: str, user_text: str) -> bool:
+    """True if the user message is plainly a continuation of the prior turn.
+
+    Conservative: requires a short message AND a prior assistant message
+    that either ends with a question, ends with a list of options, or is
+    just present (because RAG poisoning on these is so consistently bad
+    that we'd rather lose a marginal memory hit than hallucinate context).
+    """
+    if not prev_assistant:
+        return False
+    text = (user_text or "").strip()
+    if not text or len(text) > _TINY_REPLY_MAX_CHARS:
+        return False
+    if "://" in text or "@" in text:
+        return False
+    # Any prior assistant turn is enough — we already have a dedicated
+    # PREVIOUS ASSISTANT MESSAGE block; trust it over retrieval.
+    return True
+
+
 async def respond(state: JaiState) -> dict:
     # streaming=True so the WebSocket layer can forward per-token chunks
     # to the UI via stream_mode="messages". Without this, Kimi's full
@@ -127,27 +155,45 @@ async def respond(state: JaiState) -> dict:
     llm = chat_for(Role.RESPOND, temperature=0.5, streaming=True)
 
     fastlane = bool(state.get("casual_fastlane"))
+    user_text = (state.get("input_text") or "").strip()
+    prev_assistant = _last_assistant_text(state)
 
-    # On the casual fast-lane we deliberately skipped retrieval, so the
-    # memory block is guaranteed empty — don't bother formatting it or
-    # injecting an empty "RETRIEVED MEMORY" section that just confuses
-    # the LLM.
-    if fastlane:
+    # Tiny continuations ("api only", "yes do it", "the second one") get
+    # destroyed by RAG. The retriever matches surface tokens against the
+    # whole vector DB and overrides the actual conversation thread. Even
+    # when fast-lane should have fired but didn't (timing, edge case),
+    # we still want to suppress the memory block here.
+    tiny_continuation = _is_tiny_continuation(prev_assistant, user_text)
+    skip_memory = fastlane or tiny_continuation
+
+    if skip_memory:
         memory_block = ""
     else:
         memory_block = _format_memory(state)
-    skill_block = _format_skill_context(state)
+
+    # Same logic for stale skill/canvas output — a 1-3 word answer to a
+    # conversational question is not a refinement of a 2-hour-old email
+    # draft, no matter what the TTL says.
+    skill_block = "" if tiny_continuation else _format_skill_context(state)
+
+    log.info(
+        "respond.context",
+        chars=len(user_text),
+        tiny=tiny_continuation,
+        fastlane=fastlane,
+        has_prev=bool(prev_assistant),
+        memory_chars=len(memory_block),
+        skill_chars=len(skill_block),
+    )
 
     sys_text = RESPOND_SYSTEM
     if memory_block:
         sys_text += "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
 
-    # Surface the prior assistant message as its own block, ALWAYS
-    # (not just on the fast-lane). The CONTINUATION rules in the base
-    # system prompt are meaningless if the model drops the bottom of
-    # the message history — putting the verbatim prior turn here means
-    # Kimi cannot miss it.
-    prev_assistant = _last_assistant_text(state)
+    # Surface the prior assistant message as its own block, ALWAYS.
+    # The CONTINUATION rules in the base system prompt are meaningless
+    # if the model drops the bottom of the message history — putting
+    # the verbatim prior turn here means Kimi cannot miss it.
     if prev_assistant:
         # Cap so a 5k-char canvas answer doesn't blow the budget.
         snippet = prev_assistant if len(prev_assistant) <= 2000 else prev_assistant[:2000] + "\n…(truncated)"
@@ -156,8 +202,10 @@ async def respond(state: JaiState) -> dict:
             f"{snippet}\n"
             "\nIf the user's current message is short or ambiguous, "
             "interpret it as a direct continuation of THIS message above. "
-            "Do not ask for clarification when the antecedent is obvious "
-            "from this prior turn."
+            "If your prior message ended with a question or laid out "
+            "options, the user's short reply IS THE ANSWER to that "
+            "question — build on it directly, do not pivot topics, do "
+            "not anchor on retrieved memory tokens that share keywords."
         )
 
     if skill_block:

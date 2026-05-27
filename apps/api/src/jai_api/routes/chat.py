@@ -516,6 +516,12 @@ async def _run_turn(ws, graph, user, conv_id: str, text: str, tts: TTS, sb) -> N
         meta["role_used"] = role_used
     if canvas:
         meta["canvas"] = canvas
+    # Debug breadcrumbs — let us check from the DB whether the
+    # casual fast-lane fired and whether respond suppressed RAG.
+    if accumulated.get("casual_fastlane"):
+        meta["casual_fastlane"] = True
+    if accumulated.get("route"):
+        meta["route"] = accumulated.get("route")
     if sb:
         async def _insert_assistant():
             try:
