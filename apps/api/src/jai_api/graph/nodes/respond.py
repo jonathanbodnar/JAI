@@ -101,10 +101,39 @@ async def respond(state: JaiState) -> dict:
     # response has to complete before the user sees anything — that's
     # 30–90s on a heavy turn and reads as "stuck".
     llm = chat_for(Role.RESPOND, temperature=0.5, streaming=True)
-    memory_block = _format_memory(state)
+
+    fastlane = bool(state.get("casual_fastlane"))
+
+    # On the casual fast-lane we deliberately skipped retrieval, so the
+    # memory block is guaranteed empty — don't bother formatting it or
+    # injecting an empty "RETRIEVED MEMORY" section that just confuses
+    # the LLM.
+    if fastlane:
+        memory_block = ""
+    else:
+        memory_block = _format_memory(state)
     skill_block = _format_skill_context(state)
 
-    sys_text = RESPOND_SYSTEM + "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
+    sys_text = RESPOND_SYSTEM
+    if memory_block:
+        sys_text += "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
+    if fastlane:
+        # Tell the model explicitly that this is a continuation turn.
+        # The message history above is the source of truth — no extra
+        # retrieved context this time.
+        sys_text += (
+            "\n\n=== CONTINUATION TURN ===\n"
+            "This is a short follow-up to the last assistant message. "
+            "Read the most recent assistant turn in the message history "
+            "and treat the user's reply as a direct continuation of that "
+            "thread. A 1-3 word reply ('saas', 'yes do it', 'not sure', "
+            "'tell me more', 'the second one') refers to whatever you "
+            "just proposed. NEVER respond with 'what do you mean?' or "
+            "'which one?' when the prior assistant turn made the "
+            "antecedent obvious. If the user says 'not sure', help them "
+            "decide using the options you just laid out — don't ask them "
+            "to restate the topic."
+        )
     if skill_block:
         sys_text += (
             "\n\n=== RECENT SKILL / CANVAS CONTEXT (in scope for follow-ups) ===\n"

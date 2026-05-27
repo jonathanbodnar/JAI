@@ -53,9 +53,16 @@ def _route_after_orchestrator(state: JaiState) -> str:
 
 
 def _route_after_fast_intent(state: JaiState) -> str:
-    """If fast_intent set final_text via a builtin, skip everything else."""
+    """Route off the fast-intent node:
+
+    - builtin handled it → straight to persist (skip retrieve, orchestrator, respond)
+    - casual short follow-up → straight to respond (skip retrieve + orchestrator)
+    - otherwise → normal retrieve → orchestrator flow
+    """
     if state.get("final_text") and state.get("role_used", "").startswith("builtin:"):
         return "persist"
+    if state.get("casual_fastlane"):
+        return "respond"
     return "retrieve"
 
 
@@ -87,11 +94,14 @@ async def build_graph(settings: Settings) -> JaiGraph:
 
     g.add_edge(START, "ingest")
     g.add_edge("ingest", "fast_intent")
-    # Skip retrieve+orchestrator when a builtin already handled the turn.
+    # Three routes off fast_intent:
+    #   - builtin handled it → persist (no LLM needed at all)
+    #   - casual short follow-up → respond (skip retrieve + orchestrator)
+    #   - everything else → normal retrieve → orchestrator flow
     g.add_conditional_edges(
         "fast_intent",
         _route_after_fast_intent,
-        {"persist": "persist", "retrieve": "retrieve"},
+        {"persist": "persist", "respond": "respond", "retrieve": "retrieve"},
     )
     g.add_edge("retrieve", "orchestrator")
     g.add_conditional_edges(

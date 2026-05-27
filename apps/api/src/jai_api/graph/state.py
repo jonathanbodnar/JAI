@@ -31,6 +31,10 @@ class JaiState(TypedDict, total=False):
     route: Route
     route_reason: str | None
     needs_clarification: str | None
+    # Set by fast_intent when a short follow-up message qualifies for
+    # the casual-chat fast-lane (no retrieval, no orchestrator). The
+    # respond node reads this and trims its system prompt accordingly.
+    casual_fastlane: bool | None
 
     # --- delegation / sub-agents ---
     reflection_note: str | None
