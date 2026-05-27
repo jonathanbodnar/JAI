@@ -95,6 +95,30 @@ def _format_skill_context(state: JaiState) -> str:
     return "\n\n".join(sections)
 
 
+def _last_assistant_text(state: JaiState) -> str:
+    """Pull the most recent assistant message body out of state.
+
+    Models occasionally ignore the bottom of a long message history;
+    surfacing the last assistant turn as a dedicated system block
+    eliminates that failure mode for continuation-style replies
+    ("saas", "just curious", "do it", "not sure").
+    """
+    messages = state.get("messages") or []
+    for msg in reversed(messages):
+        msg_type = getattr(msg, "type", None)
+        role = None
+        content = None
+        if msg_type == "ai":
+            role = "assistant"
+            content = getattr(msg, "content", "")
+        elif isinstance(msg, dict):
+            role = msg.get("role")
+            content = msg.get("content")
+        if role == "assistant" and isinstance(content, str) and content.strip():
+            return content.strip()
+    return ""
+
+
 async def respond(state: JaiState) -> dict:
     # streaming=True so the WebSocket layer can forward per-token chunks
     # to the UI via stream_mode="messages". Without this, Kimi's full
@@ -117,23 +141,25 @@ async def respond(state: JaiState) -> dict:
     sys_text = RESPOND_SYSTEM
     if memory_block:
         sys_text += "\n\n=== RETRIEVED MEMORY ===\n" + memory_block
-    if fastlane:
-        # Tell the model explicitly that this is a continuation turn.
-        # The message history above is the source of truth — no extra
-        # retrieved context this time.
+
+    # Surface the prior assistant message as its own block, ALWAYS
+    # (not just on the fast-lane). The CONTINUATION rules in the base
+    # system prompt are meaningless if the model drops the bottom of
+    # the message history — putting the verbatim prior turn here means
+    # Kimi cannot miss it.
+    prev_assistant = _last_assistant_text(state)
+    if prev_assistant:
+        # Cap so a 5k-char canvas answer doesn't blow the budget.
+        snippet = prev_assistant if len(prev_assistant) <= 2000 else prev_assistant[:2000] + "\n…(truncated)"
         sys_text += (
-            "\n\n=== CONTINUATION TURN ===\n"
-            "This is a short follow-up to the last assistant message. "
-            "Read the most recent assistant turn in the message history "
-            "and treat the user's reply as a direct continuation of that "
-            "thread. A 1-3 word reply ('saas', 'yes do it', 'not sure', "
-            "'tell me more', 'the second one') refers to whatever you "
-            "just proposed. NEVER respond with 'what do you mean?' or "
-            "'which one?' when the prior assistant turn made the "
-            "antecedent obvious. If the user says 'not sure', help them "
-            "decide using the options you just laid out — don't ask them "
-            "to restate the topic."
+            "\n\n=== PREVIOUS ASSISTANT MESSAGE (what the user is replying to) ===\n"
+            f"{snippet}\n"
+            "\nIf the user's current message is short or ambiguous, "
+            "interpret it as a direct continuation of THIS message above. "
+            "Do not ask for clarification when the antecedent is obvious "
+            "from this prior turn."
         )
+
     if skill_block:
         sys_text += (
             "\n\n=== RECENT SKILL / CANVAS CONTEXT (in scope for follow-ups) ===\n"
