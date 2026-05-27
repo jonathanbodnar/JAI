@@ -7,6 +7,7 @@ Asks the LLM to either:
 
 from __future__ import annotations
 
+import ast
 from typing import Literal
 
 import structlog
@@ -84,6 +85,33 @@ async def build_skill(
             uses_credentials=[],
         )
 
+    # SYNTAX GUARD — if the LLM emitted Python with a syntax error
+    # (very common: missing closing paren on the last line, unterminated
+    # string, bad indentation), don't push it to the sandbox. Try one
+    # repair pass with the actual SyntaxError in the prompt; if that
+    # still fails, surface the issue to the user instead of running
+    # broken code that wastes 8s on a sandbox boot.
+    if (draft.language or "python") == "python" and draft.source:
+        repaired = await _ensure_python_parses(
+            source=draft.source,
+            goal=goal,
+            context_hint=context_hint,
+            structured=structured,
+            sys=sys,
+        )
+        if repaired is None:
+            return SkillDraft(
+                explanation=(
+                    "I drafted a script but it had a Python syntax error "
+                    "I couldn't fix automatically. Try rephrasing the "
+                    "request, or paste the data you want me to work with "
+                    "and I'll handle it in-chat."
+                ),
+                need_credentials=[],
+                uses_credentials=[],
+            )
+        draft.source = repaired
+
     # Belt-and-suspenders: scan the source for env var references and
     # union with whatever the LLM declared. LLMs sometimes forget to
     # populate `uses_credentials` even when the script reads env vars
@@ -140,6 +168,66 @@ _PLATFORM_PREFIXES = (
     "SUPABASE_",   # per-source data project vars (SUPABASE_SHOUTOUT_URL, etc.)
     "JAI_",
 )
+
+
+async def _ensure_python_parses(
+    *,
+    source: str,
+    goal: str,
+    context_hint: str | None,
+    structured,
+    sys: SystemMessage,
+) -> str | None:
+    """Make sure `source` is parseable Python. Try one auto-repair pass.
+
+    Returns the (possibly repaired) source, or None if it still won't parse.
+    """
+    err = _syntax_error(source)
+    if err is None:
+        return source
+
+    log.warning("skill.build.syntax_error", error=str(err)[:200], goal=goal[:120])
+
+    # One repair attempt: feed the broken source + the exact SyntaxError
+    # back to Qwen and ask for a fixed version. Same structured-output
+    # contract so we keep title/description/required_credentials etc.
+    repair_msg = HumanMessage(
+        content=(
+            f"Goal: {goal}\n\n"
+            f"You just drafted this Python skill, but it does not parse:\n\n"
+            f"```python\n{source}\n```\n\n"
+            f"Python's parser said: {err}\n\n"
+            f"Re-emit the SAME skill with the syntax error fixed. Keep the "
+            f"same title, description, language, and uses_credentials. Do "
+            f"not change behavior — just fix the parse error (most likely "
+            f"an unbalanced paren on the print/json.dumps line, or an "
+            f"unterminated string)."
+            + (f"\n\nOriginal context:\n{context_hint}" if context_hint else "")
+        )
+    )
+    try:
+        repaired_draft: SkillDraft = await structured.ainvoke([sys, repair_msg])
+    except Exception as e:
+        log.warning("skill.build.repair_parse_failed", error=str(e)[:200])
+        return None
+
+    new_src = repaired_draft.source or ""
+    if not new_src:
+        return None
+    if _syntax_error(new_src) is not None:
+        log.warning("skill.build.repair_still_invalid")
+        return None
+    log.info("skill.build.syntax_repaired", goal=goal[:120])
+    return new_src
+
+
+def _syntax_error(source: str) -> SyntaxError | None:
+    """Return the SyntaxError if `source` doesn't parse, else None."""
+    try:
+        ast.parse(source)
+        return None
+    except SyntaxError as e:
+        return e
 
 
 def _extract_env_keys(source: str, language: str) -> set[str]:
